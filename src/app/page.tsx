@@ -1,95 +1,83 @@
-'use client';
+// auric-ui/src/app/page.tsx
 
-import { useState } from 'react';
-import { useRouter } from 'next/navigation';
-import { apiFetch } from '@/lib/api';
-import { setToken } from '@/lib/auth';
+import Link from 'next/link';
 
-type RegisterResponse = { token: string };
-
-export default function RegisterPage() {
-  const router = useRouter();
-  const [email, setEmail] = useState('');
-  const [password, setPassword] = useState('');
-
-  const [loading, setLoading] = useState(false);
-  const [error, setError] = useState<string | null>(null);
-
-  async function onSubmit(e: React.FormEvent) {
-    e.preventDefault();
-    setError(null);
-    setLoading(true);
-
-    try {
-      const res = await apiFetch<RegisterResponse>('/auth/register', {
-        method: 'POST',
-        body: JSON.stringify({ email, password })
-      });
-
-      setToken(res.token);
-      router.push('/dashboard');
-    } catch (err: any) {
-      setError(err?.message ?? 'Register failed');
-    } finally {
-      setLoading(false);
-    }
-  }
-
+export default function HomePage() {
   return (
     <main className="min-h-screen flex items-center justify-center p-6">
-      <div className="w-full max-w-md rounded-xl border p-6 shadow-sm">
-        <h1 className="text-2xl font-semibold mb-2">Create account</h1>
-        <p className="text-sm opacity-70 mb-6">
-          Register to access your ATX dashboard and journal.
+      <div className="w-full max-w-2xl rounded-2xl border p-8 shadow-sm">
+        <div className="flex items-start justify-between gap-6">
+          <div>
+            <h1 className="text-3xl font-semibold tracking-tight">Auric</h1>
+            <p className="mt-2 text-sm opacity-70">
+              Behaviour-first trader development: ATX + epochs + journal + narrative.
+            </p>
+          </div>
+
+          <div className="flex gap-2">
+            <Link
+              href="/login"
+              className="rounded-lg border px-4 py-2 text-sm font-medium hover:bg-gray-50"
+            >
+              Login
+            </Link>
+            <Link
+              href="/register"
+              className="rounded-lg bg-black px-4 py-2 text-sm font-medium text-white hover:opacity-90"
+            >
+              Register
+            </Link>
+          </div>
+        </div>
+
+        <div className="mt-8 grid gap-3 sm:grid-cols-2">
+          <div className="rounded-xl border p-4">
+            <div className="text-sm font-medium">ATX</div>
+            <div className="mt-1 text-sm opacity-70">
+              Behavioural reliability score with subscores, flags, and profiles.
+            </div>
+          </div>
+
+          <div className="rounded-xl border p-4">
+            <div className="text-sm font-medium">Journal</div>
+            <div className="mt-1 text-sm opacity-70">
+              Calendar-based reflection prompts + summaries (weekly/monthly).
+            </div>
+          </div>
+
+          <div className="rounded-xl border p-4">
+            <div className="text-sm font-medium">Epochs</div>
+            <div className="mt-1 text-sm opacity-70">
+              No resets. Behaviour history persists while momentum can reset.
+            </div>
+          </div>
+
+          <div className="rounded-xl border p-4">
+            <div className="text-sm font-medium">Narrative</div>
+            <div className="mt-1 text-sm opacity-70">
+              Non-directive commentary: no formulas, no thresholds, no advice.
+            </div>
+          </div>
+        </div>
+
+        <div className="mt-8 flex flex-wrap gap-3">
+          <Link
+            href="/dashboard"
+            className="rounded-lg border px-4 py-2 text-sm font-medium hover:bg-gray-50"
+          >
+            Go to dashboard
+          </Link>
+          <Link
+            href="/journal"
+            className="rounded-lg border px-4 py-2 text-sm font-medium hover:bg-gray-50"
+          >
+            Open journal
+          </Link>
+        </div>
+
+        <p className="mt-6 text-xs opacity-60">
+          Note: If you aren&apos;t logged in, protected pages will redirect you to /login.
         </p>
-
-        {error && (
-          <div className="mb-4 rounded-lg border border-red-300 bg-red-50 p-3 text-sm text-red-700">
-            {error}
-          </div>
-        )}
-
-        <form onSubmit={onSubmit} className="space-y-4">
-          <div>
-            <label className="text-sm font-medium">Email</label>
-            <input
-              className="mt-1 w-full rounded-lg border px-3 py-2"
-              value={email}
-              onChange={(e) => setEmail(e.target.value)}
-              placeholder="you@example.com"
-              autoComplete="email"
-              required
-            />
-          </div>
-
-          <div>
-            <label className="text-sm font-medium">Password</label>
-            <input
-              className="mt-1 w-full rounded-lg border px-3 py-2"
-              value={password}
-              onChange={(e) => setPassword(e.target.value)}
-              placeholder="••••••••"
-              type="password"
-              autoComplete="new-password"
-              required
-            />
-          </div>
-
-          <button
-            disabled={loading}
-            className="w-full rounded-lg bg-black text-white py-2 font-medium disabled:opacity-50"
-          >
-            {loading ? 'Creating…' : 'Register'}
-          </button>
-
-          <button
-            type="button"
-            className="w-full rounded-lg border py-2 font-medium"
-            onClick={() => router.push('/login')}
-          >
-            Already have an account? Log in
-          </button>
-        </form>
       </div>
     </main>
   );
