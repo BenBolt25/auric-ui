@@ -81,9 +81,7 @@ export default function RegisterPage() {
           >
             {loading ? 'Creating…' : 'Register'}
           </button>
-<p className="text-xs opacity-60">
-  API: {process.env.NEXT_PUBLIC_API_BASE_URL || '(missing)'}
-</p>
+
           <button
             type="button"
             className="w-full rounded-lg border py-2 font-medium"
