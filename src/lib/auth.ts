@@ -1,25 +1,59 @@
-const TOKEN_KEY = 'auric_token';
+import { getToken } from './auth';
 
-export function getToken(): string | null {
-  if (typeof window === 'undefined') return null;
-  const raw = localStorage.getItem(TOKEN_KEY);
-  if (!raw) return null;
+export type ApiFetchOptions = {
+  method?: 'GET' | 'POST' | 'PATCH' | 'PUT' | 'DELETE';
+  body?: any;
+  auth?: boolean; // ✅ allow { auth: true }
+  headers?: Record<string, string>;
+};
 
-  // If someone pastes "Bearer xxx", strip it
-  return raw.startsWith('Bearer ') ? raw.slice('Bearer '.length) : raw;
+const API_BASE =
+  process.env.NEXT_PUBLIC_API_BASE_URL?.replace(/\/+$/, '') || '';
+
+function buildHeaders(opts?: ApiFetchOptions): Record<string, string> {
+  const headers: Record<string, string> = {
+    'Content-Type': 'application/json',
+    ...(opts?.headers || {})
+  };
+
+  if (opts?.auth) {
+    const token = getToken();
+    if (token) headers.Authorization = `Bearer ${token}`;
+  }
+
+  return headers;
 }
 
-export function setToken(token: string) {
-  if (typeof window === 'undefined') return;
-  const cleaned = token.startsWith('Bearer ') ? token.slice('Bearer '.length) : token;
-  localStorage.setItem(TOKEN_KEY, cleaned);
-}
+export async function apiFetch<T>(path: string, opts?: ApiFetchOptions): Promise<T> {
+  if (!API_BASE) {
+    throw new Error(
+      'NEXT_PUBLIC_API_BASE_URL is missing. Set it in .env.local (e.g. https://aurix-zero.onrender.com)'
+    );
+  }
 
-export function clearToken() {
-  if (typeof window === 'undefined') return;
-  localStorage.removeItem(TOKEN_KEY);
-}
+  const url = `${API_BASE}${path.startsWith('/') ? path : `/${path}`}`;
 
-export function isLoggedIn(): boolean {
-  return !!getToken();
+  const res = await fetch(url, {
+    method: opts?.method || 'GET',
+    headers: buildHeaders(opts),
+    body: opts?.body !== undefined ? JSON.stringify(opts.body) : undefined
+  });
+
+  const text = await res.text();
+  let json: any = null;
+  try {
+    json = text ? JSON.parse(text) : null;
+  } catch {
+    // non-json response
+  }
+
+  if (!res.ok) {
+    const msg =
+      (json && (json.error || json.message)) ||
+      text ||
+      `Request failed: ${res.status} ${res.statusText}`;
+    throw new Error(msg);
+  }
+
+  return (json ?? ({} as any)) as T;
 }
