@@ -5,17 +5,15 @@ import { useRouter } from 'next/navigation';
 import { apiFetch } from '@/lib/api';
 import { setToken } from '@/lib/auth';
 
-type LoginResponse = {
-  token: string;
-  user: { id: string; email: string };
-};
+type LoginResponse = { token: string };
 
 export default function LoginPage() {
   const router = useRouter();
-  const [email, setEmail] = useState('dev@auric.local');
-  const [password, setPassword] = useState('dev');
-  const [error, setError] = useState<string | null>(null);
+  const [email, setEmail] = useState('');
+  const [password, setPassword] = useState('');
+
   const [loading, setLoading] = useState(false);
+  const [error, setError] = useState<string | null>(null);
 
   async function onSubmit(e: React.FormEvent) {
     e.preventDefault();
@@ -25,10 +23,11 @@ export default function LoginPage() {
     try {
       const res = await apiFetch<LoginResponse>('/auth/login', {
         method: 'POST',
-        body: { email, password },
+        body: JSON.stringify({ email, password })
       });
+
       setToken(res.token);
-      router.replace('/dashboard');
+      router.push('/dashboard');
     } catch (err: any) {
       setError(err?.message ?? 'Login failed');
     } finally {
@@ -38,53 +37,57 @@ export default function LoginPage() {
 
   return (
     <main className="min-h-screen flex items-center justify-center p-6">
-      <div className="w-full max-w-md rounded-2xl border border-white/10 bg-black/40 p-6 shadow">
-        <h1 className="text-2xl font-semibold">Auric</h1>
-        <p className="mt-1 text-sm text-white/70">
-          Behavioural monitoring, epochs, and reflective learning.
+      <div className="w-full max-w-md rounded-xl border p-6 shadow-sm">
+        <h1 className="text-2xl font-semibold mb-2">Log in</h1>
+        <p className="text-sm opacity-70 mb-6">
+          Sign in to view ATX and your journal.
         </p>
 
-        <form className="mt-6 space-y-4" onSubmit={onSubmit}>
+        {error && (
+          <div className="mb-4 rounded-lg border border-red-300 bg-red-50 p-3 text-sm text-red-700">
+            {error}
+          </div>
+        )}
+
+        <form onSubmit={onSubmit} className="space-y-4">
           <div>
-            <label className="text-sm text-white/80">Email</label>
+            <label className="text-sm font-medium">Email</label>
             <input
-              className="mt-1 w-full rounded-xl bg-white/5 border border-white/10 p-3 outline-none"
+              className="mt-1 w-full rounded-lg border px-3 py-2"
               value={email}
               onChange={(e) => setEmail(e.target.value)}
+              placeholder="you@example.com"
               autoComplete="email"
+              required
             />
           </div>
 
           <div>
-            <label className="text-sm text-white/80">Password</label>
+            <label className="text-sm font-medium">Password</label>
             <input
-              className="mt-1 w-full rounded-xl bg-white/5 border border-white/10 p-3 outline-none"
-              type="password"
+              className="mt-1 w-full rounded-lg border px-3 py-2"
               value={password}
               onChange={(e) => setPassword(e.target.value)}
+              placeholder="••••••••"
+              type="password"
               autoComplete="current-password"
+              required
             />
           </div>
-
-          {error && (
-            <div className="rounded-xl border border-red-500/30 bg-red-500/10 p-3 text-sm">
-              {error}
-            </div>
-          )}
 
           <button
             disabled={loading}
-            className="w-full rounded-xl bg-white text-black py-3 font-medium disabled:opacity-60"
+            className="w-full rounded-lg bg-black text-white py-2 font-medium disabled:opacity-50"
           >
-            {loading ? 'Signing in…' : 'Sign in'}
+            {loading ? 'Signing in…' : 'Login'}
           </button>
 
           <button
             type="button"
-            className="w-full rounded-xl border border-white/15 py-3 text-white"
+            className="w-full rounded-lg border py-2 font-medium"
             onClick={() => router.push('/register')}
           >
-            Create account
+            Need an account? Register
           </button>
         </form>
       </div>
