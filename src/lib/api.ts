@@ -1,68 +1,75 @@
-// src/lib/api.ts
+// auric-ui/src/lib/api.ts
 
-export class ApiError extends Error {
-  status: number;
-  body: unknown;
-
-  constructor(message: string, status: number, body: unknown) {
-    super(message);
-    this.name = 'ApiError';
-    this.status = status;
-    this.body = body;
-  }
-}
-
-function getBaseUrl(): string {
-  const base = process.env.NEXT_PUBLIC_API_BASE_URL;
-
-  if (!base || base.trim().length === 0) {
-    throw new Error(
-      'NEXT_PUBLIC_API_BASE_URL is missing. Add it to .env.local and restart `npm run dev`.'
-    );
-  }
-
-  return base.replace(/\/$/, '');
-}
-
-type ApiFetchOptions = RequestInit & {
-  authToken?: string | null;
+type ApiFetchOptions = Omit<RequestInit, 'body'> & {
+  body?: any;
+  token?: string | null;
 };
 
-export async function apiFetch<T>(
-  path: string,
-  options: ApiFetchOptions = {}
-): Promise<T> {
-  const baseUrl = getBaseUrl();
-  const url = `${baseUrl}${path.startsWith('/') ? path : `/${path}`}`;
+// NOTE: Next.js only exposes env vars to the browser if they start with NEXT_PUBLIC_
+const RAW_BASE =
+  (process.env.NEXT_PUBLIC_API_BASE_URL || '').trim() || 'http://localhost:3000';
 
-  const { authToken, headers, body, ...rest } = options;
+// normalize: remove trailing slash
+const API_BASE = RAW_BASE.replace(/\/+$/, '');
+
+// helpful: show what base is being used (browser console)
+// will run in client pages that import this file
+if (typeof window !== 'undefined') {
+  // eslint-disable-next-line no-console
+  console.log('[auric-ui] API_BASE =', API_BASE);
+}
+
+function joinUrl(base: string, path: string) {
+  const p = path.startsWith('/') ? path : `/${path}`;
+  return `${base}${p}`;
+}
+
+export async function apiFetch<T = any>(
+  path: string,
+  opts: ApiFetchOptions = {}
+): Promise<T> {
+  const url = joinUrl(API_BASE, path);
+
+  const headers: Record<string, string> = {
+    Accept: 'application/json',
+    ...(opts.headers as Record<string, string> | undefined)
+  };
+
+  // attach auth if present
+  if (opts.token) {
+    headers.Authorization = `Bearer ${opts.token}`;
+  }
+
+  let body: any = undefined;
+  if (opts.body !== undefined) {
+    headers['Content-Type'] = 'application/json';
+    body = JSON.stringify(opts.body);
+  }
 
   const res = await fetch(url, {
-    ...rest,
-    headers: {
-      'Content-Type': 'application/json',
-      ...(authToken ? { Authorization: `Bearer ${authToken}` } : {}),
-      ...(headers || {})
-    },
+    ...opts,
+    headers,
     body
   });
 
+  // try parse json (even for errors)
   const text = await res.text();
-  let data: any = null;
-
-  try {
-    data = text ? JSON.parse(text) : null;
-  } catch {
-    data = text;
-  }
+  const maybeJson = text ? safeJson(text) : null;
 
   if (!res.ok) {
     const msg =
-      (data && typeof data === 'object' && 'error' in data && data.error) ||
-      (typeof data === 'string' && data) ||
-      `Request failed (${res.status})`;
-    throw new ApiError(String(msg), res.status, data);
+      (maybeJson && (maybeJson.error || maybeJson.message)) ||
+      `${res.status} ${res.statusText}`;
+    throw new Error(`Request failed: ${msg}`);
   }
 
-  return data as T;
+  return (maybeJson ?? (text as any)) as T;
+}
+
+function safeJson(text: string) {
+  try {
+    return JSON.parse(text);
+  } catch {
+    return null;
+  }
 }
