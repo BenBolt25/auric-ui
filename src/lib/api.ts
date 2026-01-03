@@ -1,75 +1,64 @@
-// auric-ui/src/lib/api.ts
-
-type ApiFetchOptions = Omit<RequestInit, 'body'> & {
+type ApiFetchOptions = {
+  method?: 'GET' | 'POST' | 'PATCH' | 'PUT' | 'DELETE';
+  headers?: Record<string, string>;
   body?: any;
   token?: string | null;
 };
 
-// NOTE: Next.js only exposes env vars to the browser if they start with NEXT_PUBLIC_
-const RAW_BASE =
-  (process.env.NEXT_PUBLIC_API_BASE_URL || '').trim() || 'http://localhost:3000';
-
-// normalize: remove trailing slash
-const API_BASE = RAW_BASE.replace(/\/+$/, '');
-
-// helpful: show what base is being used (browser console)
-// will run in client pages that import this file
-if (typeof window !== 'undefined') {
-  // eslint-disable-next-line no-console
-  console.log('[auric-ui] API_BASE =', API_BASE);
+function normalizeBaseUrl(raw: string | undefined) {
+  if (!raw) return '';
+  return raw.replace(/\/+$/, '');
 }
 
-function joinUrl(base: string, path: string) {
-  const p = path.startsWith('/') ? path : `/${path}`;
-  return `${base}${p}`;
-}
+export const API_BASE = normalizeBaseUrl(process.env.NEXT_PUBLIC_API_BASE_URL);
 
-export async function apiFetch<T = any>(
+export async function apiFetch<T>(
   path: string,
   opts: ApiFetchOptions = {}
 ): Promise<T> {
-  const url = joinUrl(API_BASE, path);
+  const base = API_BASE;
+  if (!base) {
+    throw new Error(
+      'NEXT_PUBLIC_API_BASE_URL is missing. Set it in Vercel Environment Variables.'
+    );
+  }
+
+  const url = `${base}${path.startsWith('/') ? path : `/${path}`}`;
 
   const headers: Record<string, string> = {
-    Accept: 'application/json',
-    ...(opts.headers as Record<string, string> | undefined)
+    'Content-Type': 'application/json',
+    ...(opts.headers || {})
   };
 
-  // attach auth if present
   if (opts.token) {
     headers.Authorization = `Bearer ${opts.token}`;
   }
 
-  let body: any = undefined;
-  if (opts.body !== undefined) {
-    headers['Content-Type'] = 'application/json';
-    body = JSON.stringify(opts.body);
-  }
-
   const res = await fetch(url, {
-    ...opts,
+    method: opts.method || 'GET',
     headers,
-    body
+    body: opts.body !== undefined ? JSON.stringify(opts.body) : undefined
   });
 
-  // try parse json (even for errors)
-  const text = await res.text();
-  const maybeJson = text ? safeJson(text) : null;
+  const contentType = res.headers.get('content-type') || '';
+  const isJson = contentType.includes('application/json');
 
   if (!res.ok) {
-    const msg =
-      (maybeJson && (maybeJson.error || maybeJson.message)) ||
-      `${res.status} ${res.statusText}`;
-    throw new Error(`Request failed: ${msg}`);
+    let detail = `${res.status} ${res.statusText}`;
+    if (isJson) {
+      try {
+        const j = await res.json();
+        if (j?.error) detail = `${detail} — ${j.error}`;
+      } catch {}
+    } else {
+      try {
+        const t = await res.text();
+        if (t) detail = `${detail} — ${t.slice(0, 200)}`;
+      } catch {}
+    }
+    throw new Error(`Request failed: ${detail}`);
   }
 
-  return (maybeJson ?? (text as any)) as T;
-}
-
-function safeJson(text: string) {
-  try {
-    return JSON.parse(text);
-  } catch {
-    return null;
-  }
+  if (isJson) return (await res.json()) as T;
+  return (await res.text()) as unknown as T;
 }
