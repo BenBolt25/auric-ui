@@ -1,10 +1,10 @@
 'use client';
 
-import { useEffect, useMemo, useState } from 'react';
+import { useEffect, useState } from 'react';
 import { useRouter } from 'next/navigation';
 import Protected from '@/components/Protected';
 import { apiFetch } from '@/lib/api';
-import { clearToken, getToken } from '@/lib/auth';
+import { clearToken } from '@/lib/auth';
 
 type DevAccountsResponse = { accounts: number[] };
 
@@ -38,31 +38,24 @@ export default function DashboardPage() {
   const [accountId, setAccountId] = useState<number>(123);
 
   const [source, setSource] = useState<'mock' | 'live'>('mock');
-  const [timeframe, setTimeframe] = useState<'epoch' | 'weekly' | 'monthly'>(
-    'epoch'
-  );
+  const [timeframe, setTimeframe] = useState<'epoch' | 'weekly' | 'monthly'>('epoch');
 
   const [data, setData] = useState<ATXResponse | null>(null);
   const [err, setErr] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
 
-  const token = useMemo(() => getToken(), []);
-
   useEffect(() => {
-    // Load account ids for the switcher
+    // Load account ids for the switcher (DEV endpoint)
     (async () => {
       try {
-        const res = await apiFetch<DevAccountsResponse>('/dev/accounts', {
-          token
-        });
+        const res = await apiFetch<DevAccountsResponse>('/dev/accounts');
         setAccounts(res.accounts || []);
         if (res.accounts?.length) setAccountId(res.accounts[0]);
       } catch (e: any) {
-        // Don’t block dashboard if dev endpoint isn’t available
         console.warn(e?.message || e);
       }
     })();
-  }, [token]);
+  }, []);
 
   async function loadATX() {
     setLoading(true);
@@ -72,7 +65,7 @@ export default function DashboardPage() {
     try {
       const res = await apiFetch<ATXResponse>(
         `/atx/accounts/${accountId}?source=${source}&timeframe=${timeframe}`,
-        { token }
+        { auth: true } // ✅ this is the only supported auth mechanism
       );
       setData(res);
     } catch (e: any) {
@@ -175,20 +168,14 @@ export default function DashboardPage() {
             </div>
           )}
 
-          {!err && !data && loading && (
-            <div className="p-3 rounded-md border">Loading…</div>
-          )}
+          {!err && !data && loading && <div className="p-3 rounded-md border">Loading…</div>}
 
           {data && (
             <div className="space-y-4">
               <div className="p-4 rounded-md border">
                 <div className="flex items-baseline justify-between">
-                  <h2 className="text-xl font-semibold">
-                    ATX Score: {data.atx.score}
-                  </h2>
-                  <div className="text-sm opacity-70">
-                    Trades: {data.tradeCount}
-                  </div>
+                  <h2 className="text-xl font-semibold">ATX Score: {data.atx.score}</h2>
+                  <div className="text-sm opacity-70">Trades: {data.tradeCount}</div>
                 </div>
 
                 <div className="mt-3 grid grid-cols-1 md:grid-cols-2 gap-2 text-sm">
@@ -202,8 +189,7 @@ export default function DashboardPage() {
                     Execution Stability: {data.atx.subscores.executionStability}
                   </div>
                   <div className="p-3 rounded-md bg-black/5">
-                    Behavioural Volatility:{' '}
-                    {data.atx.subscores.behaviouralVolatility}
+                    Behavioural Volatility: {data.atx.subscores.behaviouralVolatility}
                   </div>
                   <div className="p-3 rounded-md bg-black/5">
                     Consistency: {data.atx.subscores.consistency}
@@ -215,10 +201,7 @@ export default function DashboardPage() {
                     <div className="opacity-60 mb-1">Flags</div>
                     <div className="flex flex-wrap gap-2">
                       {data.atx.flags.map((f) => (
-                        <span
-                          key={f}
-                          className="px-2 py-1 rounded-md border text-xs"
-                        >
+                        <span key={f} className="px-2 py-1 rounded-md border text-xs">
                           {f}
                         </span>
                       ))}
