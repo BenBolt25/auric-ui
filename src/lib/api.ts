@@ -1,42 +1,55 @@
-type ApiFetchOptions = {
-  method?: string;
-  body?: unknown;
-  token?: string | null;
-  headers?: Record<string, string>;
-};
+// src/lib/api.ts
 
-/**
- * Base URL for the backend API.
- * In local dev you can set NEXT_PUBLIC_API_BASE_URL=http://localhost:3000
- * In Vercel set NEXT_PUBLIC_API_BASE_URL=https://<your-backend-host>
- */
-export const API_BASE_URL =
-  process.env.NEXT_PUBLIC_API_BASE_URL?.replace(/\/$/, '') || 'http://localhost:3000';
+export class ApiError extends Error {
+  status: number;
+  body: unknown;
 
-export async function apiFetch<T = any>(
-  path: string,
-  opts: ApiFetchOptions = {}
-): Promise<T> {
-  const url = path.startsWith('http') ? path : `${API_BASE_URL}${path}`;
+  constructor(message: string, status: number, body: unknown) {
+    super(message);
+    this.name = 'ApiError';
+    this.status = status;
+    this.body = body;
+  }
+}
 
-  const headers: Record<string, string> = {
-    'Content-Type': 'application/json',
-    ...(opts.headers || {})
-  };
+function getBaseUrl(): string {
+  const base = process.env.NEXT_PUBLIC_API_BASE_URL;
 
-  if (opts.token) {
-    headers.Authorization = `Bearer ${opts.token}`;
+  if (!base || base.trim().length === 0) {
+    throw new Error(
+      'NEXT_PUBLIC_API_BASE_URL is missing. Add it to .env.local and restart `npm run dev`.'
+    );
   }
 
+  return base.replace(/\/$/, '');
+}
+
+type ApiFetchOptions = RequestInit & {
+  authToken?: string | null;
+};
+
+export async function apiFetch<T>(
+  path: string,
+  options: ApiFetchOptions = {}
+): Promise<T> {
+  const baseUrl = getBaseUrl();
+  const url = `${baseUrl}${path.startsWith('/') ? path : `/${path}`}`;
+
+  const { authToken, headers, body, ...rest } = options;
+
   const res = await fetch(url, {
-    method: opts.method || 'GET',
-    headers,
-    body: opts.body ? JSON.stringify(opts.body) : undefined
+    ...rest,
+    headers: {
+      'Content-Type': 'application/json',
+      ...(authToken ? { Authorization: `Bearer ${authToken}` } : {}),
+      ...(headers || {})
+    },
+    body
   });
 
-  // Try to parse JSON error bodies too
   const text = await res.text();
   let data: any = null;
+
   try {
     data = text ? JSON.parse(text) : null;
   } catch {
@@ -45,9 +58,10 @@ export async function apiFetch<T = any>(
 
   if (!res.ok) {
     const msg =
-      (data && (data.error || data.message)) ||
-      `Request failed: ${res.status} ${res.statusText}`;
-    throw new Error(msg);
+      (data && typeof data === 'object' && 'error' in data && data.error) ||
+      (typeof data === 'string' && data) ||
+      `Request failed (${res.status})`;
+    throw new ApiError(String(msg), res.status, data);
   }
 
   return data as T;
