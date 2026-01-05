@@ -23,7 +23,7 @@ export default function RegisterPage() {
     try {
       const res = await apiFetch<RegisterResponse>('/auth/register', {
         method: 'POST',
-        body: JSON.stringify({ email, password })
+        body: { email, password }
       });
 
       setToken(res.token);
