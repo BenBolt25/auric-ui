@@ -36,7 +36,9 @@ export async function apiFetch<T>(path: string, opts?: ApiFetchOptions): Promise
   const res = await fetch(url, {
     method: opts?.method || 'GET',
     headers: buildHeaders(opts),
-    body: opts?.body !== undefined ? JSON.stringify(opts.body) : undefined
+    body: opts?.body !== undefined 
+  ? (typeof opts.body === 'string' ? opts.body : JSON.stringify(opts.body)) 
+  : undefined
   });
 
   const text = await res.text();
