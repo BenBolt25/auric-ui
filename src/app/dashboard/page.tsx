@@ -1,6 +1,6 @@
 'use client';
 
-import { useEffect, useState } from 'react';
+import { useEffect, useMemo, useState } from 'react';
 import { useRouter } from 'next/navigation';
 import Protected from '@/components/Protected';
 import { apiFetch } from '@/lib/api';
@@ -31,6 +31,31 @@ type ATXResponse = {
   };
 };
 
+// If backend returns an error body that is an object, React will crash if we render it directly.
+// This helper guarantees we always render a string.
+function toDisplayString(value: unknown): string {
+  if (value == null) return '';
+  if (typeof value === 'string') return value;
+  if (typeof value === 'number' || typeof value === 'boolean') return String(value);
+
+  // common cases: { message: ... } or thrown JSON from apiFetch
+  if (typeof value === 'object') {
+    const anyVal = value as any;
+    if (typeof anyVal.message === 'string') return anyVal.message;
+    try {
+      return JSON.stringify(value, null, 2);
+    } catch {
+      return String(value);
+    }
+  }
+
+  try {
+    return String(value);
+  } catch {
+    return 'Unknown error';
+  }
+}
+
 export default function DashboardPage() {
   const router = useRouter();
 
@@ -41,18 +66,29 @@ export default function DashboardPage() {
   const [timeframe, setTimeframe] = useState<'epoch' | 'weekly' | 'monthly'>('epoch');
 
   const [data, setData] = useState<ATXResponse | null>(null);
-  const [err, setErr] = useState<string | null>(null);
+
+  // keep err as unknown so we can store either string/object safely
+  const [err, setErr] = useState<unknown>(null);
+
+  // store last raw payload for debugging if response shape isn't what UI expects
+  const [debugPayload, setDebugPayload] = useState<unknown>(null);
+
   const [loading, setLoading] = useState(false);
+
+  const errText = useMemo(() => (err ? toDisplayString(err) : null), [err]);
 
   useEffect(() => {
     // Load account ids for the switcher (DEV endpoint)
     (async () => {
       try {
-        const res = await apiFetch<DevAccountsResponse>('/dev/accounts');
-        setAccounts(res.accounts || []);
-        if (res.accounts?.length) setAccountId(res.accounts[0]);
-      } catch (e: any) {
-        console.warn(e?.message || e);
+        // NOTE: if /dev/accounts requires auth on your backend, set { auth: true }
+        const res = await apiFetch<DevAccountsResponse>('/dev/accounts', { auth: true } as any);
+        const list = res.accounts || [];
+        setAccounts(list);
+        if (list.length) setAccountId(list[0]);
+      } catch (e) {
+        // Don’t crash dashboard if dev endpoint isn’t enabled in prod
+        console.warn('Failed to load /dev/accounts:', e);
       }
     })();
   }, []);
@@ -61,15 +97,33 @@ export default function DashboardPage() {
     setLoading(true);
     setErr(null);
     setData(null);
+    setDebugPayload(null);
 
     try {
-      const res = await apiFetch<ATXResponse>(
+      // Use unknown here because backend might return an error-shape JSON
+      // and apiFetch might throw/return unexpected shapes.
+      const res = await apiFetch<unknown>(
         `/atx/accounts/${accountId}?source=${source}&timeframe=${timeframe}`,
-        { auth: true } // ✅ this is the only supported auth mechanism
+        { auth: true } // ✅ your supported auth mechanism
       );
-      setData(res);
+
+      // Validate the shape before treating it as ATXResponse
+      const r: any = res as any;
+
+      // If backend returned something like { accountId, sources, tradeCounts } (meta object)
+      // or any other shape, keep it for debugging and show a friendly error.
+      if (!r || typeof r !== 'object' || !r.atx || typeof r.atx.score !== 'number') {
+        setDebugPayload(res);
+        setErr(
+          `Unexpected ATX response shape. This usually means the backend errored or returned a meta payload instead of ATX.`
+        );
+        return;
+      }
+
+      setData(r as ATXResponse);
     } catch (e: any) {
-      setErr(e?.message || 'Failed to load ATX');
+      // Some fetch wrappers throw objects (e.g. parsed JSON). Never render raw objects.
+      setErr(e?.message ?? e ?? 'Failed to load ATX');
     } finally {
       setLoading(false);
     }
@@ -117,6 +171,11 @@ export default function DashboardPage() {
                   </option>
                 ))}
               </select>
+              {!accounts.length && (
+                <div className="mt-2 text-xs opacity-60">
+                  Using fallback accountId 123 (dev accounts not loaded).
+                </div>
+              )}
             </div>
 
             <div className="p-3 rounded-md border">
@@ -162,13 +221,23 @@ export default function DashboardPage() {
             </button>
           </div>
 
-          {err && (
+          {errText && (
             <div className="p-3 rounded-md border border-red-300 bg-red-50 text-red-800">
-              {err}
+              <div className="font-semibold mb-2">Error</div>
+              <pre className="text-xs whitespace-pre-wrap">{errText}</pre>
             </div>
           )}
 
-          {!err && !data && loading && <div className="p-3 rounded-md border">Loading…</div>}
+          {debugPayload && (
+            <div className="p-3 rounded-md border">
+              <div className="font-semibold mb-2">Debug: raw response</div>
+              <pre className="text-xs whitespace-pre-wrap">
+                {toDisplayString(debugPayload)}
+              </pre>
+            </div>
+          )}
+
+          {!errText && !data && loading && <div className="p-3 rounded-md border">Loading…</div>}
 
           {data && (
             <div className="space-y-4">
