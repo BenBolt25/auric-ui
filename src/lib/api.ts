@@ -33,6 +33,8 @@ export async function apiFetch<T>(path: string, opts?: ApiFetchOptions): Promise
 
   const url = `${API_BASE}${path.startsWith('/') ? path : `/${path}`}`;
 
+console.log('[apiFetch] body type:', typeof opts?.body, 'value:', opts?.body);
+  
   const res = await fetch(url, {
     method: opts?.method || 'GET',
     headers: buildHeaders(opts),
