@@ -1,4 +1,4 @@
-'use client';
+﻿'use client';
 
 import { useEffect, useMemo, useState } from 'react';
 import { useRouter } from 'next/navigation';
@@ -31,14 +31,11 @@ type ATXResponse = {
   };
 };
 
-// If backend returns an error body that is an object, React will crash if we render it directly.
-// This helper guarantees we always render a string.
 function toDisplayString(value: unknown): string {
   if (value == null) return '';
   if (typeof value === 'string') return value;
   if (typeof value === 'number' || typeof value === 'boolean') return String(value);
 
-  // common cases: { message: ... } or thrown JSON from apiFetch
   if (typeof value === 'object') {
     const anyVal = value as any;
     if (typeof anyVal.message === 'string') return anyVal.message;
@@ -66,28 +63,20 @@ export default function DashboardPage() {
   const [timeframe, setTimeframe] = useState<'epoch' | 'weekly' | 'monthly'>('epoch');
 
   const [data, setData] = useState<ATXResponse | null>(null);
-
-  // keep err as unknown so we can store either string/object safely
   const [err, setErr] = useState<unknown>(null);
-
-  // store last raw payload for debugging if response shape isn't what UI expects
   const [debugPayload, setDebugPayload] = useState<unknown>(null);
-
   const [loading, setLoading] = useState(false);
 
   const errText = useMemo(() => (err ? toDisplayString(err) : null), [err]);
 
   useEffect(() => {
-    // Load account ids for the switcher (DEV endpoint)
     (async () => {
       try {
-        // NOTE: if /dev/accounts requires auth on your backend, set { auth: true }
         const res = await apiFetch<DevAccountsResponse>('/dev/accounts', { auth: true } as any);
         const list = res.accounts || [];
         setAccounts(list);
         if (list.length) setAccountId(list[0]);
       } catch (e) {
-        // Don’t crash dashboard if dev endpoint isn’t enabled in prod
         console.warn('Failed to load /dev/accounts:', e);
       }
     })();
@@ -100,18 +89,12 @@ export default function DashboardPage() {
     setDebugPayload(null);
 
     try {
-      // Use unknown here because backend might return an error-shape JSON
-      // and apiFetch might throw/return unexpected shapes.
       const res = await apiFetch<unknown>(
         `/atx/accounts/${accountId}?source=${source}&timeframe=${timeframe}`,
-        { auth: true } // ✅ your supported auth mechanism
+        { auth: true }
       );
 
-      // Validate the shape before treating it as ATXResponse
       const r: any = res as any;
-
-      // If backend returned something like { accountId, sources, tradeCounts } (meta object)
-      // or any other shape, keep it for debugging and show a friendly error.
       if (!r || typeof r !== 'object' || !r.atx || typeof r.atx.score !== 'number') {
         setDebugPayload(res);
         setErr(
@@ -122,7 +105,6 @@ export default function DashboardPage() {
 
       setData(r as ATXResponse);
     } catch (e: any) {
-      // Some fetch wrappers throw objects (e.g. parsed JSON). Never render raw objects.
       setErr(e?.message ?? e ?? 'Failed to load ATX');
     } finally {
       setLoading(false);
