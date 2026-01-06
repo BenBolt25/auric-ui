@@ -15,6 +15,14 @@ type Account = {
 type AccountsResponse = { accounts: Account[] };
 type CreateAccountResponse = { account: Account };
 
+type CommentaryPayload = {
+  summary: string;
+  // Backend currently returns `bullets`, older UI expected `bulletPoints`
+  bullets?: string[];
+  bulletPoints?: string[];
+  reflectionQuestions?: string[];
+};
+
 type ATXResponse = {
   accountId: number;
   tradeCount: number;
@@ -31,11 +39,7 @@ type ATXResponse = {
     profiles?: string[];
     flags: string[];
   };
-  commentary?: {
-    summary: string;
-    bulletPoints: string[];
-    reflectionQuestions?: string[];
-  };
+  commentary?: CommentaryPayload;
 };
 
 function toDisplayString(value: unknown): string {
@@ -92,7 +96,9 @@ export default function DashboardPage() {
     }
 
     setAccounts(accs);
-    if (!accountId && accs.length) setAccountId(accs[0].accountId);
+
+    // If we don't have an accountId selected yet, select the first
+    setAccountId((prev) => (prev ? prev : accs[0]?.accountId ?? 0));
   }
 
   useEffect(() => {
@@ -160,6 +166,13 @@ export default function DashboardPage() {
     if (accountId) loadATX();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [accountId, source, timeframe]);
+
+  const commentaryBullets =
+    data?.commentary?.bulletPoints?.length
+      ? data.commentary.bulletPoints
+      : data?.commentary?.bullets?.length
+        ? data.commentary.bullets
+        : [];
 
   return (
     <Protected>
@@ -324,12 +337,24 @@ export default function DashboardPage() {
                 <div className="p-4 rounded-md border">
                   <h3 className="font-semibold">Commentary</h3>
                   <p className="mt-2 text-sm">{data.commentary.summary}</p>
-                  {data.commentary.bulletPoints?.length ? (
+
+                  {commentaryBullets.length ? (
                     <ul className="mt-2 text-sm list-disc pl-5 space-y-1">
-                      {data.commentary.bulletPoints.map((b, i) => (
+                      {commentaryBullets.map((b, i) => (
                         <li key={i}>{b}</li>
                       ))}
                     </ul>
+                  ) : null}
+
+                  {data.commentary.reflectionQuestions?.length ? (
+                    <div className="mt-4">
+                      <div className="text-sm font-semibold">Reflection questions</div>
+                      <ul className="mt-2 text-sm list-disc pl-5 space-y-1">
+                        {data.commentary.reflectionQuestions.map((q, i) => (
+                          <li key={i}>{q}</li>
+                        ))}
+                      </ul>
+                    </div>
                   ) : null}
                 </div>
               )}
