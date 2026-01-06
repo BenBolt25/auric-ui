@@ -6,7 +6,29 @@ import Protected from '@/components/Protected';
 import { apiFetch } from '@/lib/api';
 import { clearToken } from '@/lib/auth';
 
-type DevAccountsResponse = { accounts: number[] };
+type Account = { accountId: number; name: string; createdAt: number };
+type AccountsResponse = { accounts: Account[] };
+
+type TrendPoint = {
+  createdAt: number;
+  epochId: number;
+  score: number;
+  subscores: {
+    discipline: number;
+    riskIntegrity: number;
+    executionStability: number;
+    behaviouralVolatility: number;
+    consistency: number;
+  };
+  flags: string[];
+};
+
+type TrendsResponse = {
+  accountId: number;
+  timeframe: string;
+  points: number;
+  trend: TrendPoint[];
+};
 
 type ATXResponse = {
   accountId: number;
@@ -53,16 +75,41 @@ function toDisplayString(value: unknown): string {
   }
 }
 
+function Sparkline({ values }: { values: number[] }) {
+  if (!values.length) return <div className="text-xs opacity-60">No trend yet</div>;
+  const w = 320;
+  const h = 64;
+
+  const min = Math.min(...values);
+  const max = Math.max(...values);
+  const span = Math.max(1, max - min);
+
+  const points = values
+    .map((v, i) => {
+      const x = (i / Math.max(1, values.length - 1)) * w;
+      const y = h - ((v - min) / span) * h;
+      return `${x.toFixed(1)},${y.toFixed(1)}`;
+    })
+    .join(' ');
+
+  return (
+    <svg width={w} height={h} viewBox={`0 0 ${w} ${h}`} className="block">
+      <polyline fill="none" stroke="currentColor" strokeWidth="2" points={points} />
+    </svg>
+  );
+}
+
 export default function DashboardPage() {
   const router = useRouter();
 
-  const [accounts, setAccounts] = useState<number[]>([]);
-  const [accountId, setAccountId] = useState<number>(123);
+  const [accounts, setAccounts] = useState<Account[]>([]);
+  const [accountId, setAccountId] = useState<number>(0);
 
   const [source, setSource] = useState<'mock' | 'live'>('mock');
   const [timeframe, setTimeframe] = useState<'epoch' | 'weekly' | 'monthly'>('epoch');
 
   const [data, setData] = useState<ATXResponse | null>(null);
+  const [trend, setTrend] = useState<TrendPoint[]>([]);
   const [err, setErr] = useState<unknown>(null);
   const [debugPayload, setDebugPayload] = useState<unknown>(null);
 
@@ -71,20 +118,17 @@ export default function DashboardPage() {
 
   const errText = useMemo(() => (err ? toDisplayString(err) : null), [err]);
 
-  useEffect(() => {
-    (async () => {
-      try {
-        const res = await apiFetch<DevAccountsResponse>('/dev/accounts', { auth: true } as any);
-        const list = res.accounts || [];
-        setAccounts(list);
-        if (list.length) setAccountId(list[0]);
-      } catch (e) {
-        console.warn('Failed to load /dev/accounts:', e);
-      }
-    })();
-  }, []);
+  async function loadAccounts() {
+    const res = await apiFetch<AccountsResponse>('/accounts', { auth: true });
+    const list = res.accounts || [];
+    setAccounts(list);
+    if (list.length && !accountId) setAccountId(list[0].accountId);
+  }
 
-  async function loadATX() {
+  async function loadATX(idOverride?: number) {
+    const id = idOverride ?? accountId;
+    if (!id) return;
+
     setLoading(true);
     setErr(null);
     setSeedInfo(null);
@@ -93,16 +137,14 @@ export default function DashboardPage() {
 
     try {
       const res = await apiFetch<unknown>(
-        `/atx/accounts/${accountId}?source=${source}&timeframe=${timeframe}`,
+        `/atx/accounts/${id}?source=${source}&timeframe=${timeframe}`,
         { auth: true }
       );
 
       const r: any = res as any;
       if (!r || typeof r !== 'object' || !r.atx || typeof r.atx.score !== 'number') {
         setDebugPayload(res);
-        setErr(
-          `Unexpected ATX response shape. This usually means the backend errored or returned a meta payload instead of ATX.`
-        );
+        setErr(`Unexpected ATX response shape.`);
         return;
       }
 
@@ -114,23 +156,41 @@ export default function DashboardPage() {
     }
   }
 
+  async function loadTrends(idOverride?: number) {
+    const id = idOverride ?? accountId;
+    if (!id) return;
+
+    try {
+      const res = await apiFetch<TrendsResponse>(
+        `/atx/accounts/${id}/trends?timeframe=${timeframe}&points=12`,
+        { auth: true }
+      );
+      setTrend(res.trend || []);
+    } catch {
+      setTrend([]);
+    }
+  }
+
   async function seedMockTrades() {
+    if (!accountId) return;
+
     setLoading(true);
     setErr(null);
     setSeedInfo(null);
 
     try {
       const res = await apiFetch<{ ok: boolean; accountId: number; inserted: number }>(
-        '/dev/mock-trades',
+        `/accounts/${accountId}/seed-mock-trades`,
         {
           method: 'POST',
           auth: true,
-          body: { accountId, count: 300 }
+          body: { count: 300 }
         }
       );
 
       setSeedInfo(`Seeded ${res.inserted} mock trades for account ${res.accountId}.`);
-      await loadATX();
+      await loadATX(res.accountId);
+      await loadTrends(res.accountId);
     } catch (e: any) {
       setErr(e?.message ?? e ?? 'Failed to seed mock trades');
     } finally {
@@ -139,7 +199,14 @@ export default function DashboardPage() {
   }
 
   useEffect(() => {
-    loadATX();
+    loadAccounts().catch((e) => setErr(e));
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  useEffect(() => {
+    if (!accountId) return;
+    loadATX().catch((e) => setErr(e));
+    loadTrends().catch(() => {});
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [accountId, source, timeframe]);
 
@@ -171,19 +238,20 @@ export default function DashboardPage() {
               <div className="text-xs opacity-60 mb-1">Account</div>
               <select
                 className="w-full border rounded-md p-2"
-                value={accountId}
+                value={accountId || ''}
                 onChange={(e) => setAccountId(Number(e.target.value))}
               >
-                {(accounts.length ? accounts : [123]).map((id) => (
-                  <option key={id} value={id}>
-                    {id}
+                <option value="" disabled>
+                  Select…
+                </option>
+                {accounts.map((a) => (
+                  <option key={a.accountId} value={a.accountId}>
+                    {a.name} (#{a.accountId})
                   </option>
                 ))}
               </select>
               {!accounts.length && (
-                <div className="mt-2 text-xs opacity-60">
-                  Using fallback accountId 123 (dev accounts not loaded).
-                </div>
+                <div className="mt-2 text-xs opacity-60">No accounts found. Re-register or call POST /accounts.</div>
               )}
             </div>
 
@@ -216,8 +284,8 @@ export default function DashboardPage() {
           <div className="flex flex-wrap gap-2">
             <button
               className="px-4 py-2 rounded-md bg-black text-white"
-              onClick={loadATX}
-              disabled={loading}
+              onClick={() => loadATX()}
+              disabled={loading || !accountId}
             >
               {loading ? 'Loading…' : 'Refresh'}
             </button>
@@ -225,24 +293,18 @@ export default function DashboardPage() {
             <button
               className="px-4 py-2 rounded-md border"
               onClick={seedMockTrades}
-              disabled={loading}
-              title="Seeds mock trades on the backend, then refreshes ATX"
+              disabled={loading || !accountId}
             >
               Seed mock trades
             </button>
 
-            <button
-              className="px-4 py-2 rounded-md border"
-              onClick={() => router.push('/journal')}
-            >
+            <button className="px-4 py-2 rounded-md border" onClick={() => router.push('/journal')}>
               Journal
             </button>
           </div>
 
           {seedInfo && !errText && (
-            <div className="p-3 rounded-md border border-green-300 bg-green-50 text-green-900">
-              {seedInfo}
-            </div>
+            <div className="p-3 rounded-md border border-green-300 bg-green-50 text-green-900">{seedInfo}</div>
           )}
 
           {errText && (
@@ -252,7 +314,6 @@ export default function DashboardPage() {
             </div>
           )}
 
-          {/* FIX: make the condition boolean so ReactNode typing is valid */}
           {debugPayload != null && (
             <div className="p-3 rounded-md border">
               <div className="font-semibold mb-2">Debug: raw response</div>
@@ -260,7 +321,17 @@ export default function DashboardPage() {
             </div>
           )}
 
-          {!errText && !data && loading && <div className="p-3 rounded-md border">Loading…</div>}
+          <div className="p-4 rounded-md border">
+            <div className="flex items-baseline justify-between">
+              <div className="font-semibold">ATX trend (last 12)</div>
+              <button className="text-sm underline opacity-70" onClick={() => loadTrends()}>
+                reload trend
+              </button>
+            </div>
+            <div className="mt-2 text-sm">
+              <Sparkline values={trend.map((t) => t.score)} />
+            </div>
+          </div>
 
           {data && (
             <div className="space-y-4">
@@ -271,21 +342,15 @@ export default function DashboardPage() {
                 </div>
 
                 <div className="mt-3 grid grid-cols-1 md:grid-cols-2 gap-2 text-sm">
-                  <div className="p-3 rounded-md bg-black/5">
-                    Discipline: {data.atx.subscores.discipline}
-                  </div>
-                  <div className="p-3 rounded-md bg-black/5">
-                    Risk Integrity: {data.atx.subscores.riskIntegrity}
-                  </div>
+                  <div className="p-3 rounded-md bg-black/5">Discipline: {data.atx.subscores.discipline}</div>
+                  <div className="p-3 rounded-md bg-black/5">Risk Integrity: {data.atx.subscores.riskIntegrity}</div>
                   <div className="p-3 rounded-md bg-black/5">
                     Execution Stability: {data.atx.subscores.executionStability}
                   </div>
                   <div className="p-3 rounded-md bg-black/5">
                     Behavioural Volatility: {data.atx.subscores.behaviouralVolatility}
                   </div>
-                  <div className="p-3 rounded-md bg-black/5">
-                    Consistency: {data.atx.subscores.consistency}
-                  </div>
+                  <div className="p-3 rounded-md bg-black/5">Consistency: {data.atx.subscores.consistency}</div>
                 </div>
 
                 {data.atx.flags?.length ? (
