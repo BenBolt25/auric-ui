@@ -120,7 +120,6 @@ export default function DashboardPage() {
     setSeedInfo(null);
 
     try {
-      // Seeds in-memory mock trades on the backend (Render restart wipes them; re-seed anytime)
       const res = await apiFetch<{ ok: boolean; accountId: number; inserted: number }>(
         '/dev/mock-trades',
         {
@@ -253,7 +252,8 @@ export default function DashboardPage() {
             </div>
           )}
 
-          {debugPayload && (
+          {/* FIX: make the condition boolean so ReactNode typing is valid */}
+          {debugPayload != null && (
             <div className="p-3 rounded-md border">
               <div className="font-semibold mb-2">Debug: raw response</div>
               <pre className="text-xs whitespace-pre-wrap">{toDisplayString(debugPayload)}</pre>
