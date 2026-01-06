@@ -1,4 +1,4 @@
-﻿'use client';
+'use client';
 
 import { useEffect, useMemo, useState } from 'react';
 import { useRouter } from 'next/navigation';
@@ -65,7 +65,9 @@ export default function DashboardPage() {
   const [data, setData] = useState<ATXResponse | null>(null);
   const [err, setErr] = useState<unknown>(null);
   const [debugPayload, setDebugPayload] = useState<unknown>(null);
+
   const [loading, setLoading] = useState(false);
+  const [seedInfo, setSeedInfo] = useState<string | null>(null);
 
   const errText = useMemo(() => (err ? toDisplayString(err) : null), [err]);
 
@@ -85,6 +87,7 @@ export default function DashboardPage() {
   async function loadATX() {
     setLoading(true);
     setErr(null);
+    setSeedInfo(null);
     setData(null);
     setDebugPayload(null);
 
@@ -106,6 +109,31 @@ export default function DashboardPage() {
       setData(r as ATXResponse);
     } catch (e: any) {
       setErr(e?.message ?? e ?? 'Failed to load ATX');
+    } finally {
+      setLoading(false);
+    }
+  }
+
+  async function seedMockTrades() {
+    setLoading(true);
+    setErr(null);
+    setSeedInfo(null);
+
+    try {
+      // Seeds in-memory mock trades on the backend (Render restart wipes them; re-seed anytime)
+      const res = await apiFetch<{ ok: boolean; accountId: number; inserted: number }>(
+        '/dev/mock-trades',
+        {
+          method: 'POST',
+          auth: true,
+          body: { accountId, count: 300 }
+        }
+      );
+
+      setSeedInfo(`Seeded ${res.inserted} mock trades for account ${res.accountId}.`);
+      await loadATX();
+    } catch (e: any) {
+      setErr(e?.message ?? e ?? 'Failed to seed mock trades');
     } finally {
       setLoading(false);
     }
@@ -186,7 +214,7 @@ export default function DashboardPage() {
             </div>
           </div>
 
-          <div className="flex gap-2">
+          <div className="flex flex-wrap gap-2">
             <button
               className="px-4 py-2 rounded-md bg-black text-white"
               onClick={loadATX}
@@ -197,11 +225,26 @@ export default function DashboardPage() {
 
             <button
               className="px-4 py-2 rounded-md border"
+              onClick={seedMockTrades}
+              disabled={loading}
+              title="Seeds mock trades on the backend, then refreshes ATX"
+            >
+              Seed mock trades
+            </button>
+
+            <button
+              className="px-4 py-2 rounded-md border"
               onClick={() => router.push('/journal')}
             >
               Journal
             </button>
           </div>
+
+          {seedInfo && !errText && (
+            <div className="p-3 rounded-md border border-green-300 bg-green-50 text-green-900">
+              {seedInfo}
+            </div>
+          )}
 
           {errText && (
             <div className="p-3 rounded-md border border-red-300 bg-red-50 text-red-800">
@@ -213,9 +256,7 @@ export default function DashboardPage() {
           {debugPayload && (
             <div className="p-3 rounded-md border">
               <div className="font-semibold mb-2">Debug: raw response</div>
-              <pre className="text-xs whitespace-pre-wrap">
-                {toDisplayString(debugPayload)}
-              </pre>
+              <pre className="text-xs whitespace-pre-wrap">{toDisplayString(debugPayload)}</pre>
             </div>
           )}
 
