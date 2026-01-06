@@ -6,29 +6,14 @@ import Protected from '@/components/Protected';
 import { apiFetch } from '@/lib/api';
 import { clearToken } from '@/lib/auth';
 
-type Account = { accountId: number; name: string; createdAt: number };
-type AccountsResponse = { accounts: Account[] };
-
-type TrendPoint = {
-  createdAt: number;
-  epochId: number;
-  score: number;
-  subscores: {
-    discipline: number;
-    riskIntegrity: number;
-    executionStability: number;
-    behaviouralVolatility: number;
-    consistency: number;
-  };
-  flags: string[];
-};
-
-type TrendsResponse = {
+type Account = {
   accountId: number;
-  timeframe: string;
-  points: number;
-  trend: TrendPoint[];
+  name: string;
+  createdAt: number;
 };
+
+type AccountsResponse = { accounts: Account[] };
+type CreateAccountResponse = { account: Account };
 
 type ATXResponse = {
   accountId: number;
@@ -75,30 +60,6 @@ function toDisplayString(value: unknown): string {
   }
 }
 
-function Sparkline({ values }: { values: number[] }) {
-  if (!values.length) return <div className="text-xs opacity-60">No trend yet</div>;
-  const w = 320;
-  const h = 64;
-
-  const min = Math.min(...values);
-  const max = Math.max(...values);
-  const span = Math.max(1, max - min);
-
-  const points = values
-    .map((v, i) => {
-      const x = (i / Math.max(1, values.length - 1)) * w;
-      const y = h - ((v - min) / span) * h;
-      return `${x.toFixed(1)},${y.toFixed(1)}`;
-    })
-    .join(' ');
-
-  return (
-    <svg width={w} height={h} viewBox={`0 0 ${w} ${h}`} className="block">
-      <polyline fill="none" stroke="currentColor" strokeWidth="2" points={points} />
-    </svg>
-  );
-}
-
 export default function DashboardPage() {
   const router = useRouter();
 
@@ -109,7 +70,6 @@ export default function DashboardPage() {
   const [timeframe, setTimeframe] = useState<'epoch' | 'weekly' | 'monthly'>('epoch');
 
   const [data, setData] = useState<ATXResponse | null>(null);
-  const [trend, setTrend] = useState<TrendPoint[]>([]);
   const [err, setErr] = useState<unknown>(null);
   const [debugPayload, setDebugPayload] = useState<unknown>(null);
 
@@ -118,16 +78,30 @@ export default function DashboardPage() {
 
   const errText = useMemo(() => (err ? toDisplayString(err) : null), [err]);
 
-  async function loadAccounts() {
-    const res = await apiFetch<AccountsResponse>('/accounts', { auth: true });
-    const list = res.accounts || [];
-    setAccounts(list);
-    if (list.length && !accountId) setAccountId(list[0].accountId);
+  async function ensureAccounts() {
+    const list = await apiFetch<AccountsResponse>('/accounts', { auth: true });
+    let accs = list.accounts || [];
+
+    if (!accs.length) {
+      const created = await apiFetch<CreateAccountResponse>('/accounts', {
+        method: 'POST',
+        auth: true,
+        body: { name: 'Primary' }
+      });
+      accs = [created.account];
+    }
+
+    setAccounts(accs);
+    if (!accountId && accs.length) setAccountId(accs[0].accountId);
   }
 
-  async function loadATX(idOverride?: number) {
-    const id = idOverride ?? accountId;
-    if (!id) return;
+  useEffect(() => {
+    ensureAccounts().catch((e) => setErr(e));
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  async function loadATX() {
+    if (!accountId) return;
 
     setLoading(true);
     setErr(null);
@@ -137,7 +111,7 @@ export default function DashboardPage() {
 
     try {
       const res = await apiFetch<unknown>(
-        `/atx/accounts/${id}?source=${source}&timeframe=${timeframe}`,
+        `/atx/accounts/${accountId}?source=${source}&timeframe=${timeframe}`,
         { auth: true }
       );
 
@@ -153,21 +127,6 @@ export default function DashboardPage() {
       setErr(e?.message ?? e ?? 'Failed to load ATX');
     } finally {
       setLoading(false);
-    }
-  }
-
-  async function loadTrends(idOverride?: number) {
-    const id = idOverride ?? accountId;
-    if (!id) return;
-
-    try {
-      const res = await apiFetch<TrendsResponse>(
-        `/atx/accounts/${id}/trends?timeframe=${timeframe}&points=12`,
-        { auth: true }
-      );
-      setTrend(res.trend || []);
-    } catch {
-      setTrend([]);
     }
   }
 
@@ -189,8 +148,7 @@ export default function DashboardPage() {
       );
 
       setSeedInfo(`Seeded ${res.inserted} mock trades for account ${res.accountId}.`);
-      await loadATX(res.accountId);
-      await loadTrends(res.accountId);
+      await loadATX();
     } catch (e: any) {
       setErr(e?.message ?? e ?? 'Failed to seed mock trades');
     } finally {
@@ -199,14 +157,7 @@ export default function DashboardPage() {
   }
 
   useEffect(() => {
-    loadAccounts().catch((e) => setErr(e));
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
-
-  useEffect(() => {
-    if (!accountId) return;
-    loadATX().catch((e) => setErr(e));
-    loadTrends().catch(() => {});
+    if (accountId) loadATX();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [accountId, source, timeframe]);
 
@@ -250,8 +201,11 @@ export default function DashboardPage() {
                   </option>
                 ))}
               </select>
+
               {!accounts.length && (
-                <div className="mt-2 text-xs opacity-60">No accounts found. Re-register or call POST /accounts.</div>
+                <div className="mt-2 text-xs opacity-60">
+                  No accounts found yet — creating one automatically should fix this.
+                </div>
               )}
             </div>
 
@@ -284,7 +238,7 @@ export default function DashboardPage() {
           <div className="flex flex-wrap gap-2">
             <button
               className="px-4 py-2 rounded-md bg-black text-white"
-              onClick={() => loadATX()}
+              onClick={loadATX}
               disabled={loading || !accountId}
             >
               {loading ? 'Loading…' : 'Refresh'}
@@ -294,6 +248,7 @@ export default function DashboardPage() {
               className="px-4 py-2 rounded-md border"
               onClick={seedMockTrades}
               disabled={loading || !accountId}
+              title="Seeds mock trades via real /accounts endpoint, then refreshes ATX"
             >
               Seed mock trades
             </button>
@@ -304,7 +259,9 @@ export default function DashboardPage() {
           </div>
 
           {seedInfo && !errText && (
-            <div className="p-3 rounded-md border border-green-300 bg-green-50 text-green-900">{seedInfo}</div>
+            <div className="p-3 rounded-md border border-green-300 bg-green-50 text-green-900">
+              {seedInfo}
+            </div>
           )}
 
           {errText && (
@@ -321,17 +278,7 @@ export default function DashboardPage() {
             </div>
           )}
 
-          <div className="p-4 rounded-md border">
-            <div className="flex items-baseline justify-between">
-              <div className="font-semibold">ATX trend (last 12)</div>
-              <button className="text-sm underline opacity-70" onClick={() => loadTrends()}>
-                reload trend
-              </button>
-            </div>
-            <div className="mt-2 text-sm">
-              <Sparkline values={trend.map((t) => t.score)} />
-            </div>
-          </div>
+          {!errText && !data && loading && <div className="p-3 rounded-md border">Loading…</div>}
 
           {data && (
             <div className="space-y-4">
@@ -342,15 +289,21 @@ export default function DashboardPage() {
                 </div>
 
                 <div className="mt-3 grid grid-cols-1 md:grid-cols-2 gap-2 text-sm">
-                  <div className="p-3 rounded-md bg-black/5">Discipline: {data.atx.subscores.discipline}</div>
-                  <div className="p-3 rounded-md bg-black/5">Risk Integrity: {data.atx.subscores.riskIntegrity}</div>
+                  <div className="p-3 rounded-md bg-black/5">
+                    Discipline: {data.atx.subscores.discipline}
+                  </div>
+                  <div className="p-3 rounded-md bg-black/5">
+                    Risk Integrity: {data.atx.subscores.riskIntegrity}
+                  </div>
                   <div className="p-3 rounded-md bg-black/5">
                     Execution Stability: {data.atx.subscores.executionStability}
                   </div>
                   <div className="p-3 rounded-md bg-black/5">
                     Behavioural Volatility: {data.atx.subscores.behaviouralVolatility}
                   </div>
-                  <div className="p-3 rounded-md bg-black/5">Consistency: {data.atx.subscores.consistency}</div>
+                  <div className="p-3 rounded-md bg-black/5">
+                    Consistency: {data.atx.subscores.consistency}
+                  </div>
                 </div>
 
                 {data.atx.flags?.length ? (
