@@ -46,9 +46,7 @@ export default function RegisterPage() {
     <main className="min-h-screen flex items-center justify-center p-6">
       <div className="w-full max-w-md rounded-xl border p-6 shadow-sm">
         <h1 className="text-2xl font-semibold mb-2">Create account</h1>
-        <p className="text-sm opacity-70 mb-6">
-          Register to access your ATX dashboard and journal.
-        </p>
+        <p className="text-sm opacity-70 mb-6">Register to access your ATX dashboard and journal.</p>
 
         {error && (
           <div className="mb-4 rounded-lg border border-red-300 bg-red-50 p-3 text-sm text-red-700">
@@ -89,11 +87,12 @@ export default function RegisterPage() {
             {loading ? 'Creating…' : 'Register'}
           </button>
 
-          <p className="text-xs opacity-60">
-            API: {process.env.NEXT_PUBLIC_API_BASE_URL || '(missing)'}
-          </p>
+          {emailExists && (
+            <div className="text-xs opacity-70">
+              Use “Log in” or “Forgot password” to regain access.
+            </div>
+          )}
 
-          {/* Primary navigation */}
           <button
             type="button"
             className="w-full rounded-lg border py-2 font-medium"
@@ -102,7 +101,6 @@ export default function RegisterPage() {
             Already have an account? Log in
           </button>
 
-          {/* Show this always (or only when emailExists=true if you prefer) */}
           <button
             type="button"
             className="w-full rounded-lg border py-2 font-medium"
@@ -111,12 +109,9 @@ export default function RegisterPage() {
             Forgot password
           </button>
 
-          {/* Optional: if you only want it when 409 happens, wrap with: {emailExists && (...)} */}
-          {emailExists && (
-            <div className="text-xs opacity-70">
-              Tip: use “Log in” or “Forgot password” to regain access.
-            </div>
-          )}
+          <p className="text-xs opacity-60">
+            API: {process.env.NEXT_PUBLIC_API_BASE_URL || '(missing)'}
+          </p>
         </form>
       </div>
     </main>
