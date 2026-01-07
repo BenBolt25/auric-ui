@@ -20,20 +20,22 @@ type CalendarResponse = {
   days: Array<{ date: string; hasEntry: boolean; types: string[] }>;
 };
 
+type JournalEntryDTO = {
+  id: string;
+  type: string;
+  createdAt: number;
+  title: string;
+  timeframe?: string;
+  systemNotes: string[];
+  aiReflectionQuestions: string[];
+  userNotes?: string;
+};
+
 type DayResponse = {
   accountId: number;
   date: string;
   entryCount: number;
-  entries: Array<{
-    id: string;
-    type: string;
-    createdAt: number;
-    title: string;
-    timeframe?: string;
-    systemNotes: string[];
-    aiReflectionQuestions: string[];
-    userNotes?: string;
-  }>;
+  entries: JournalEntryDTO[];
 };
 
 const SELECTED_ACCOUNT_KEY = 'auric_selected_account_id';
@@ -59,6 +61,12 @@ function setStoredAccountId(id: number) {
   window.localStorage.setItem(SELECTED_ACCOUNT_KEY, String(id));
 }
 
+function createdAtForDate(dateYYYYMMDD: string): number {
+  // Pin to noon UTC so it reliably falls on the selected date
+  const ms = Date.parse(`${dateYYYYMMDD}T12:00:00.000Z`);
+  return Number.isFinite(ms) ? ms : Date.now();
+}
+
 export default function JournalPage() {
   const router = useRouter();
 
@@ -69,7 +77,17 @@ export default function JournalPage() {
   const [calendar, setCalendar] = useState<CalendarResponse | null>(null);
   const [selectedDate, setSelectedDate] = useState<string | null>(null);
   const [day, setDay] = useState<DayResponse | null>(null);
+
   const [error, setError] = useState<string | null>(null);
+  const [loading, setLoading] = useState(false);
+
+  // Create entry form
+  const [newTitle, setNewTitle] = useState('');
+  const [newNotes, setNewNotes] = useState('');
+
+  // Edit notes inline
+  const [editingId, setEditingId] = useState<string | null>(null);
+  const [editNotes, setEditNotes] = useState('');
 
   async function ensureAccounts() {
     const list = await apiFetch<AccountsResponse>('/accounts', { auth: true });
@@ -94,6 +112,20 @@ export default function JournalPage() {
     setStoredAccountId(picked);
   }
 
+  async function loadCalendar(aid: number, m: string) {
+    const res = await apiFetch<CalendarResponse>(`/journal/accounts/${aid}/calendar?month=${m}`, {
+      auth: true
+    });
+    setCalendar(res);
+  }
+
+  async function loadDay(aid: number, date: string) {
+    const res = await apiFetch<DayResponse>(`/journal/accounts/${aid}/day?date=${date}`, {
+      auth: true
+    });
+    setDay(res);
+  }
+
   useEffect(() => {
     ensureAccounts().catch((e: any) => setError(e?.message ?? 'Failed to load accounts'));
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -105,27 +137,25 @@ export default function JournalPage() {
     setError(null);
     setSelectedDate(null);
     setDay(null);
+    setEditingId(null);
+    setEditNotes('');
+    setNewTitle('');
+    setNewNotes('');
 
-    (async () => {
-      const res = await apiFetch<CalendarResponse>(
-        `/journal/accounts/${accountId}/calendar?month=${month}`,
-        { auth: true }
-      );
-      setCalendar(res);
-    })().catch((e: any) => setError(e?.message ?? 'Failed to load calendar'));
+    setLoading(true);
+    loadCalendar(accountId, month)
+      .catch((e: any) => setError(e?.message ?? 'Failed to load calendar'))
+      .finally(() => setLoading(false));
   }, [accountId, month]);
 
   useEffect(() => {
     if (!accountId || !selectedDate) return;
-    setError(null);
 
-    (async () => {
-      const res = await apiFetch<DayResponse>(
-        `/journal/accounts/${accountId}/day?date=${selectedDate}`,
-        { auth: true }
-      );
-      setDay(res);
-    })().catch((e: any) => setError(e?.message ?? 'Failed to load day'));
+    setError(null);
+    setLoading(true);
+    loadDay(accountId, selectedDate)
+      .catch((e: any) => setError(e?.message ?? 'Failed to load day'))
+      .finally(() => setLoading(false));
   }, [accountId, selectedDate]);
 
   const markers = useMemo(() => {
@@ -138,64 +168,170 @@ export default function JournalPage() {
   const monthIndex = (mm ?? 1) - 1;
   const totalDays = daysInMonth(yy, monthIndex);
 
+  async function createEntry() {
+    if (!accountId || !selectedDate) return;
+
+    const title = newTitle.trim();
+    if (!title) {
+      setError('Title is required');
+      return;
+    }
+
+    setError(null);
+    setLoading(true);
+
+    try {
+      await apiFetch(`/journal/accounts/${accountId}/entries`, {
+        method: 'POST',
+        auth: true,
+        body: {
+          title,
+          userNotes: newNotes.trim() || undefined,
+          createdAt: createdAtForDate(selectedDate)
+        }
+      });
+
+      setNewTitle('');
+      setNewNotes('');
+
+      // Refresh both day + calendar markers
+      await loadDay(accountId, selectedDate);
+      await loadCalendar(accountId, month);
+    } catch (e: any) {
+      setError(e?.message ?? 'Failed to create entry');
+    } finally {
+      setLoading(false);
+    }
+  }
+
+  function startEdit(entry: JournalEntryDTO) {
+    setEditingId(entry.id);
+    setEditNotes(entry.userNotes ?? '');
+  }
+
+  async function saveEdit(entryId: string) {
+    if (!accountId || !selectedDate) return;
+
+    const notes = editNotes.trim();
+    if (!notes) {
+      setError('Notes cannot be empty');
+      return;
+    }
+
+    setError(null);
+    setLoading(true);
+
+    try {
+      await apiFetch(`/journal/accounts/${accountId}/entries/${entryId}`, {
+        method: 'PATCH',
+        auth: true,
+        body: { userNotes: notes }
+      });
+
+      setEditingId(null);
+      setEditNotes('');
+
+      await loadDay(accountId, selectedDate);
+      await loadCalendar(accountId, month);
+    } catch (e: any) {
+      setError(e?.message ?? 'Failed to update notes');
+    } finally {
+      setLoading(false);
+    }
+  }
+
   return (
     <Protected>
       <main className="min-h-screen p-6">
         <header className="flex items-center justify-between">
           <div>
             <h1 className="text-2xl font-semibold">Journal</h1>
-            <p className="text-sm text-white/70">Calendar-based reflection with system prompts and summaries.</p>
+            <p className="text-sm opacity-70">Calendar-based reflection with manual entries.</p>
           </div>
-          <button className="rounded-xl border border-white/15 px-4 py-2" onClick={() => router.push('/dashboard')}>
+          <button className="rounded-xl border px-4 py-2" onClick={() => router.push('/dashboard')}>
             Back
           </button>
         </header>
 
         <section className="mt-6 grid gap-4 lg:grid-cols-3">
-          <div className="rounded-2xl border border-white/10 bg-black/40 p-4">
-            <div className="space-y-3">
-              <div>
-                <label className="text-sm text-white/70">Account</label>
-                <select
-                  className="mt-1 w-full rounded-xl bg-white/5 border border-white/10 p-3"
-                  value={accountId || ''}
-                  onChange={(e) => {
-                    const id = Number(e.target.value);
-                    setAccountId(id);
-                    setStoredAccountId(id);
-                  }}
-                >
-                  <option value="" disabled>
-                    Select…
+          {/* Left: controls + create entry */}
+          <div className="rounded-2xl border p-4 space-y-4">
+            <div>
+              <label className="text-sm opacity-70">Account</label>
+              <select
+                className="mt-1 w-full rounded-xl border p-3"
+                value={accountId || ''}
+                onChange={(e) => {
+                  const id = Number(e.target.value);
+                  setAccountId(id);
+                  setStoredAccountId(id);
+                }}
+              >
+                <option value="" disabled>
+                  Select…
+                </option>
+                {accounts.map((a) => (
+                  <option key={a.accountId} value={a.accountId}>
+                    {a.name} (#{a.accountId})
                   </option>
-                  {accounts.map((a) => (
-                    <option key={a.accountId} value={a.accountId}>
-                      {a.name} (#{a.accountId})
-                    </option>
-                  ))}
-                </select>
-              </div>
+                ))}
+              </select>
+            </div>
 
-              <div>
-                <label className="text-sm text-white/70">Month</label>
-                <input
-                  className="mt-1 w-full rounded-xl bg-white/5 border border-white/10 p-3"
-                  value={month}
-                  onChange={(e) => setMonth(e.target.value)}
-                  placeholder="YYYY-MM"
-                />
-                <div className="mt-1 text-xs text-white/50">Format: YYYY-MM</div>
-              </div>
+            <div>
+              <label className="text-sm opacity-70">Month</label>
+              <input
+                className="mt-1 w-full rounded-xl border p-3"
+                value={month}
+                onChange={(e) => setMonth(e.target.value)}
+                placeholder="YYYY-MM"
+              />
+              <div className="mt-1 text-xs opacity-60">Format: YYYY-MM</div>
+            </div>
 
-              {error && (
-                <div className="rounded-xl border border-red-400/30 bg-red-500/10 p-3 text-sm text-red-200">
-                  {error}
+            <div className="rounded-xl border p-3">
+              <div className="text-sm font-semibold">Create entry</div>
+              {!selectedDate ? (
+                <div className="mt-2 text-sm opacity-70">Select a day on the calendar first.</div>
+              ) : (
+                <div className="mt-2 space-y-2">
+                  <div className="text-xs opacity-60">Selected date: {selectedDate}</div>
+                  <input
+                    className="w-full rounded-xl border p-2"
+                    placeholder="Title (required)"
+                    value={newTitle}
+                    onChange={(e) => setNewTitle(e.target.value)}
+                    disabled={loading}
+                  />
+                  <textarea
+                    className="w-full rounded-xl border p-2 min-h-[90px]"
+                    placeholder="Notes (optional)"
+                    value={newNotes}
+                    onChange={(e) => setNewNotes(e.target.value)}
+                    disabled={loading}
+                  />
+                  <button
+                    className="px-3 py-2 rounded-xl bg-black text-white text-sm"
+                    onClick={createEntry}
+                    disabled={loading}
+                  >
+                    {loading ? 'Saving…' : 'Create'}
+                  </button>
                 </div>
               )}
             </div>
+
+            {loading && <div className="text-sm opacity-70">Loading…</div>}
+
+            {error && (
+              <div className="rounded-xl border border-red-300 bg-red-50 p-3 text-sm text-red-800">
+                {error}
+              </div>
+            )}
           </div>
 
-          <div className="rounded-2xl border border-white/10 bg-black/40 p-4 lg:col-span-2">
+          {/* Right: calendar + day entries */}
+          <div className="rounded-2xl border p-4 lg:col-span-2">
             <div className="grid grid-cols-2 gap-3 sm:grid-cols-3 lg:grid-cols-4">
               {Array.from({ length: totalDays }).map((_, i) => {
                 const dayNum = i + 1;
@@ -210,56 +346,106 @@ export default function JournalPage() {
                     onClick={() => setSelectedDate(date)}
                     className={[
                       'rounded-xl border p-3 text-left',
-                      active ? 'border-white/40 bg-white/10' : 'border-white/10 bg-white/5'
+                      active ? 'border-black bg-black/5' : 'border-black/10'
                     ].join(' ')}
                   >
                     <div className="text-sm font-semibold">{dayNum}</div>
-                    <div className="mt-1 text-[11px] text-white/60">{has ? types.join(', ') : '—'}</div>
+                    <div className="mt-1 text-[11px] opacity-60">{has ? types.join(', ') : '—'}</div>
                   </button>
                 );
               })}
             </div>
 
             {day && (
-              <div className="mt-4 rounded-2xl border border-white/10 bg-black/30 p-4">
+              <div className="mt-4 rounded-2xl border p-4">
                 <div className="mb-2 flex items-baseline justify-between">
                   <div className="font-semibold">{day.date}</div>
-                  <div className="text-sm text-white/60">{day.entryCount} entries</div>
+                  <div className="text-sm opacity-70">{day.entryCount} entries</div>
                 </div>
 
                 <div className="space-y-3">
-                  {day.entries.map((e) => (
-                    <div key={e.id} className="rounded-xl border border-white/10 bg-white/5 p-3">
-                      <div className="flex items-baseline justify-between">
-                        <div className="font-semibold">{e.title}</div>
-                        <div className="text-xs text-white/60">{e.type}</div>
-                      </div>
+                  {day.entries.map((e) => {
+                    const isEditing = editingId === e.id;
 
-                      {e.userNotes && <div className="mt-2 text-sm text-white/80">{e.userNotes}</div>}
+                    return (
+                      <div key={e.id} className="rounded-xl border p-3">
+                        <div className="flex items-baseline justify-between gap-3">
+                          <div className="font-semibold">{e.title}</div>
+                          <div className="text-xs opacity-60">{e.type}</div>
+                        </div>
 
-                      {e.systemNotes?.length ? (
-                        <ul className="mt-2 list-disc pl-5 text-sm text-white/70 space-y-1">
-                          {e.systemNotes.map((n, idx) => (
-                            <li key={idx}>{n}</li>
-                          ))}
-                        </ul>
-                      ) : null}
+                        {!isEditing ? (
+                          <>
+                            {e.userNotes ? (
+                              <div className="mt-2 text-sm whitespace-pre-wrap">{e.userNotes}</div>
+                            ) : (
+                              <div className="mt-2 text-sm opacity-60">No notes yet.</div>
+                            )}
 
-                      {e.aiReflectionQuestions?.length ? (
-                        <div className="mt-3">
-                          <div className="text-sm font-semibold">Reflection</div>
-                          <ul className="mt-2 list-disc pl-5 text-sm text-white/70 space-y-1">
-                            {e.aiReflectionQuestions.map((q, idx) => (
-                              <li key={idx}>{q}</li>
+                            <div className="mt-3 flex gap-2">
+                              <button
+                                className="px-3 py-2 rounded-xl border text-sm"
+                                onClick={() => startEdit(e)}
+                                disabled={loading}
+                              >
+                                Edit notes
+                              </button>
+                            </div>
+                          </>
+                        ) : (
+                          <>
+                            <textarea
+                              className="mt-2 w-full rounded-xl border p-2 min-h-[90px]"
+                              value={editNotes}
+                              onChange={(ev) => setEditNotes(ev.target.value)}
+                              disabled={loading}
+                            />
+                            <div className="mt-3 flex gap-2">
+                              <button
+                                className="px-3 py-2 rounded-xl bg-black text-white text-sm"
+                                onClick={() => saveEdit(e.id)}
+                                disabled={loading}
+                              >
+                                {loading ? 'Saving…' : 'Save'}
+                              </button>
+                              <button
+                                className="px-3 py-2 rounded-xl border text-sm"
+                                onClick={() => {
+                                  setEditingId(null);
+                                  setEditNotes('');
+                                }}
+                                disabled={loading}
+                              >
+                                Cancel
+                              </button>
+                            </div>
+                          </>
+                        )}
+
+                        {e.systemNotes?.length ? (
+                          <ul className="mt-3 list-disc pl-5 text-sm opacity-70 space-y-1">
+                            {e.systemNotes.map((n, idx) => (
+                              <li key={idx}>{n}</li>
                             ))}
                           </ul>
-                        </div>
-                      ) : null}
-                    </div>
-                  ))}
+                        ) : null}
+
+                        {e.aiReflectionQuestions?.length ? (
+                          <div className="mt-3">
+                            <div className="text-sm font-semibold">Reflection</div>
+                            <ul className="mt-2 list-disc pl-5 text-sm opacity-70 space-y-1">
+                              {e.aiReflectionQuestions.map((q, idx) => (
+                                <li key={idx}>{q}</li>
+                              ))}
+                            </ul>
+                          </div>
+                        ) : null}
+                      </div>
+                    );
+                  })}
 
                   {day.entries.length === 0 && (
-                    <div className="text-sm text-white/70">No entries for this day.</div>
+                    <div className="text-sm opacity-70">No entries for this day.</div>
                   )}
                 </div>
               </div>
