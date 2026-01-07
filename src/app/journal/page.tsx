@@ -38,6 +38,29 @@ type DayResponse = {
   entries: JournalEntryDTO[];
 };
 
+type TradeDTO = {
+  source: string; // added by backend unified trades day endpoint
+  tradeId: string;
+  accountId: number;
+  instrument?: string;
+  side?: 'long' | 'short';
+  qty?: number;
+  timestamp: number;
+  entryPrice?: number;
+  exitPrice?: number;
+  stopLossPrice?: number | null;
+  takeProfitPrice?: number | null;
+  orderType?: 'market' | 'limit';
+};
+
+type TradesDayResponse = {
+  accountId: number;
+  date: string;
+  sources: string[] | null;
+  tradeCount: number;
+  trades: TradeDTO[];
+};
+
 const SELECTED_ACCOUNT_KEY = 'auric_selected_account_id';
 
 function yyyymm(d: Date) {
@@ -67,6 +90,14 @@ function createdAtForDate(dateYYYYMMDD: string): number {
   return Number.isFinite(ms) ? ms : Date.now();
 }
 
+function fmtTime(ms: number) {
+  try {
+    return new Date(ms).toLocaleString();
+  } catch {
+    return String(ms);
+  }
+}
+
 export default function JournalPage() {
   const router = useRouter();
 
@@ -75,13 +106,19 @@ export default function JournalPage() {
 
   const [month, setMonth] = useState<string>(yyyymm(new Date()));
   const [calendar, setCalendar] = useState<CalendarResponse | null>(null);
+
   const [selectedDate, setSelectedDate] = useState<string | null>(null);
+
   const [day, setDay] = useState<DayResponse | null>(null);
+  const [tradesDay, setTradesDay] = useState<TradesDayResponse | null>(null);
+
+  const [selectedSources, setSelectedSources] = useState<string[]>([]); // empty => all
 
   const [error, setError] = useState<string | null>(null);
-  const [loading, setLoading] = useState(false);
+  const [loadingCalendar, setLoadingCalendar] = useState(false);
+  const [loadingDay, setLoadingDay] = useState(false);
 
-  // Create entry form
+  // Notes form (NOT trades)
   const [newTitle, setNewTitle] = useState('');
   const [newNotes, setNewNotes] = useState('');
 
@@ -126,36 +163,63 @@ export default function JournalPage() {
     setDay(res);
   }
 
+  async function loadTradesForDay(aid: number, date: string, sources?: string[]) {
+    const qs = new URLSearchParams();
+    qs.set('date', date);
+    if (sources && sources.length) qs.set('sources', sources.join(','));
+
+    const res = await apiFetch<TradesDayResponse>(`/trades/accounts/${aid}/day?${qs.toString()}`, {
+      auth: true
+    });
+    setTradesDay(res);
+  }
+
   useEffect(() => {
     ensureAccounts().catch((e: any) => setError(e?.message ?? 'Failed to load accounts'));
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
+  // Load calendar when account/month changes
   useEffect(() => {
     if (!accountId) return;
 
     setError(null);
     setSelectedDate(null);
+
     setDay(null);
+    setTradesDay(null);
+    setSelectedSources([]);
+
     setEditingId(null);
     setEditNotes('');
     setNewTitle('');
     setNewNotes('');
 
-    setLoading(true);
+    setLoadingCalendar(true);
     loadCalendar(accountId, month)
       .catch((e: any) => setError(e?.message ?? 'Failed to load calendar'))
-      .finally(() => setLoading(false));
+      .finally(() => setLoadingCalendar(false));
   }, [accountId, month]);
 
+  // Load day + trades when selectedDate changes
   useEffect(() => {
     if (!accountId || !selectedDate) return;
 
     setError(null);
-    setLoading(true);
-    loadDay(accountId, selectedDate)
+    setLoadingDay(true);
+
+    setDay(null);
+    setTradesDay(null);
+    setSelectedSources([]); // default "all sources" when switching day
+    setEditingId(null);
+    setEditNotes('');
+
+    Promise.all([
+      loadDay(accountId, selectedDate),
+      loadTradesForDay(accountId, selectedDate)
+    ])
       .catch((e: any) => setError(e?.message ?? 'Failed to load day'))
-      .finally(() => setLoading(false));
+      .finally(() => setLoadingDay(false));
   }, [accountId, selectedDate]);
 
   const markers = useMemo(() => {
@@ -168,17 +232,44 @@ export default function JournalPage() {
   const monthIndex = (mm ?? 1) - 1;
   const totalDays = daysInMonth(yy, monthIndex);
 
+  const availableSources = useMemo(() => {
+    const set = new Set<string>();
+    (tradesDay?.trades ?? []).forEach((t) => set.add(t.source));
+    return Array.from(set).sort();
+  }, [tradesDay]);
+
+  async function toggleSource(source: string) {
+    if (!accountId || !selectedDate) return;
+
+    let next: string[];
+    if (selectedSources.includes(source)) {
+      next = selectedSources.filter((s) => s !== source);
+    } else {
+      next = [...selectedSources, source];
+    }
+
+    setSelectedSources(next);
+
+    setLoadingDay(true);
+    setError(null);
+    try {
+      await loadTradesForDay(accountId, selectedDate, next.length ? next : undefined);
+    } catch (e: any) {
+      setError(e?.message ?? 'Failed to load trades');
+    } finally {
+      setLoadingDay(false);
+    }
+  }
+
   async function createEntry() {
     if (!accountId || !selectedDate) return;
 
-    const title = newTitle.trim();
-    if (!title) {
-      setError('Title is required');
-      return;
-    }
+    // Notes-only entry (title optional in UI, but backend expects it)
+    const title = newTitle.trim() || 'Notes';
+    const notes = newNotes.trim();
 
     setError(null);
-    setLoading(true);
+    setLoadingDay(true);
 
     try {
       await apiFetch(`/journal/accounts/${accountId}/entries`, {
@@ -186,7 +277,7 @@ export default function JournalPage() {
         auth: true,
         body: {
           title,
-          userNotes: newNotes.trim() || undefined,
+          userNotes: notes || undefined,
           createdAt: createdAtForDate(selectedDate)
         }
       });
@@ -194,13 +285,11 @@ export default function JournalPage() {
       setNewTitle('');
       setNewNotes('');
 
-      // Refresh both day + calendar markers
-      await loadDay(accountId, selectedDate);
-      await loadCalendar(accountId, month);
+      await Promise.all([loadDay(accountId, selectedDate), loadCalendar(accountId, month)]);
     } catch (e: any) {
-      setError(e?.message ?? 'Failed to create entry');
+      setError(e?.message ?? 'Failed to create notes');
     } finally {
-      setLoading(false);
+      setLoadingDay(false);
     }
   }
 
@@ -219,7 +308,7 @@ export default function JournalPage() {
     }
 
     setError(null);
-    setLoading(true);
+    setLoadingDay(true);
 
     try {
       await apiFetch(`/journal/accounts/${accountId}/entries/${entryId}`, {
@@ -231,12 +320,11 @@ export default function JournalPage() {
       setEditingId(null);
       setEditNotes('');
 
-      await loadDay(accountId, selectedDate);
-      await loadCalendar(accountId, month);
+      await Promise.all([loadDay(accountId, selectedDate), loadCalendar(accountId, month)]);
     } catch (e: any) {
       setError(e?.message ?? 'Failed to update notes');
     } finally {
-      setLoading(false);
+      setLoadingDay(false);
     }
   }
 
@@ -246,7 +334,9 @@ export default function JournalPage() {
         <header className="flex items-center justify-between">
           <div>
             <h1 className="text-2xl font-semibold">Journal</h1>
-            <p className="text-sm opacity-70">Calendar-based reflection with manual entries.</p>
+            <p className="text-sm opacity-70">
+              Trades are automatic (by source). Journal entries are your notes/reflections layered on top.
+            </p>
           </div>
           <button className="rounded-xl border px-4 py-2" onClick={() => router.push('/dashboard')}>
             Back
@@ -254,7 +344,7 @@ export default function JournalPage() {
         </header>
 
         <section className="mt-6 grid gap-4 lg:grid-cols-3">
-          {/* Left: controls + create entry */}
+          {/* Left: controls + notes */}
           <div className="rounded-2xl border p-4 space-y-4">
             <div>
               <label className="text-sm opacity-70">Account</label>
@@ -290,38 +380,41 @@ export default function JournalPage() {
             </div>
 
             <div className="rounded-xl border p-3">
-              <div className="text-sm font-semibold">Create entry</div>
+              <div className="text-sm font-semibold">Add notes (not trades)</div>
               {!selectedDate ? (
                 <div className="mt-2 text-sm opacity-70">Select a day on the calendar first.</div>
               ) : (
                 <div className="mt-2 space-y-2">
                   <div className="text-xs opacity-60">Selected date: {selectedDate}</div>
+
                   <input
                     className="w-full rounded-xl border p-2"
-                    placeholder="Title (required)"
+                    placeholder="Title (optional — defaults to “Notes”)"
                     value={newTitle}
                     onChange={(e) => setNewTitle(e.target.value)}
-                    disabled={loading}
+                    disabled={loadingCalendar || loadingDay}
                   />
+
                   <textarea
                     className="w-full rounded-xl border p-2 min-h-[90px]"
-                    placeholder="Notes (optional)"
+                    placeholder="Notes"
                     value={newNotes}
                     onChange={(e) => setNewNotes(e.target.value)}
-                    disabled={loading}
+                    disabled={loadingCalendar || loadingDay}
                   />
+
                   <button
                     className="px-3 py-2 rounded-xl bg-black text-white text-sm"
                     onClick={createEntry}
-                    disabled={loading}
+                    disabled={loadingCalendar || loadingDay}
                   >
-                    {loading ? 'Saving…' : 'Create'}
+                    {loadingDay ? 'Saving…' : 'Save notes'}
                   </button>
                 </div>
               )}
             </div>
 
-            {loading && <div className="text-sm opacity-70">Loading…</div>}
+            {(loadingCalendar || loadingDay) && <div className="text-sm opacity-70">Loading…</div>}
 
             {error && (
               <div className="rounded-xl border border-red-300 bg-red-50 p-3 text-sm text-red-800">
@@ -330,7 +423,7 @@ export default function JournalPage() {
             )}
           </div>
 
-          {/* Right: calendar + day entries */}
+          {/* Right: calendar + day */}
           <div className="rounded-2xl border p-4 lg:col-span-2">
             <div className="grid grid-cols-2 gap-3 sm:grid-cols-3 lg:grid-cols-4">
               {Array.from({ length: totalDays }).map((_, i) => {
@@ -356,97 +449,196 @@ export default function JournalPage() {
               })}
             </div>
 
-            {day && (
+            {/* Day panel */}
+            {selectedDate && (
               <div className="mt-4 rounded-2xl border p-4">
-                <div className="mb-2 flex items-baseline justify-between">
-                  <div className="font-semibold">{day.date}</div>
-                  <div className="text-sm opacity-70">{day.entryCount} entries</div>
+                <div className="mb-3 flex items-baseline justify-between">
+                  <div className="font-semibold">{selectedDate}</div>
+                  <div className="text-sm opacity-70">
+                    {day?.entryCount ?? 0} entries • {tradesDay?.tradeCount ?? 0} trades
+                  </div>
                 </div>
 
-                <div className="space-y-3">
-                  {day.entries.map((e) => {
-                    const isEditing = editingId === e.id;
+                {/* Trades */}
+                <div className="rounded-xl border p-3">
+                  <div className="flex items-center justify-between gap-3">
+                    <div className="text-sm font-semibold">Trades</div>
+                    <div className="text-xs opacity-60">
+                      {tradesDay ? `${tradesDay.tradeCount} total` : '—'}
+                    </div>
+                  </div>
 
-                    return (
-                      <div key={e.id} className="rounded-xl border p-3">
+                  {/* Source filters */}
+                  {availableSources.length > 0 && (
+                    <div className="mt-3 flex flex-wrap gap-2">
+                      {availableSources.map((s) => {
+                        const active = selectedSources.length === 0 || selectedSources.includes(s);
+                        return (
+                          <button
+                            key={s}
+                            className={[
+                              'px-3 py-1.5 rounded-xl border text-xs',
+                              active ? 'bg-black text-white border-black' : 'border-black/20'
+                            ].join(' ')}
+                            onClick={() => toggleSource(s)}
+                            disabled={loadingDay}
+                            title="Toggle source filter"
+                          >
+                            {s}
+                          </button>
+                        );
+                      })}
+                      {selectedSources.length > 0 && (
+                        <button
+                          className="px-3 py-1.5 rounded-xl border text-xs"
+                          onClick={async () => {
+                            if (!accountId || !selectedDate) return;
+                            setSelectedSources([]);
+                            setLoadingDay(true);
+                            try {
+                              await loadTradesForDay(accountId, selectedDate);
+                            } finally {
+                              setLoadingDay(false);
+                            }
+                          }}
+                          disabled={loadingDay}
+                          title="Clear filters"
+                        >
+                          Clear
+                        </button>
+                      )}
+                    </div>
+                  )}
+
+                  <div className="mt-3 space-y-2">
+                    {(tradesDay?.trades ?? []).slice(0, 50).map((t) => (
+                      <div key={`${t.source}:${t.tradeId}`} className="rounded-xl border p-3">
                         <div className="flex items-baseline justify-between gap-3">
-                          <div className="font-semibold">{e.title}</div>
-                          <div className="text-xs opacity-60">{e.type}</div>
+                          <div className="font-semibold text-sm">
+                            {t.instrument || '—'} • {t.side || '—'} • {t.qty ?? '—'}
+                          </div>
+                          <div className="text-xs opacity-60">{t.source}</div>
                         </div>
 
-                        {!isEditing ? (
-                          <>
-                            {e.userNotes ? (
-                              <div className="mt-2 text-sm whitespace-pre-wrap">{e.userNotes}</div>
-                            ) : (
-                              <div className="mt-2 text-sm opacity-60">No notes yet.</div>
-                            )}
+                        <div className="mt-2 grid grid-cols-1 sm:grid-cols-2 gap-2 text-xs opacity-80">
+                          <div>Time: {fmtTime(t.timestamp)}</div>
+                          <div>Order: {t.orderType || '—'}</div>
+                          <div>Entry: {t.entryPrice ?? '—'}</div>
+                          <div>Exit: {t.exitPrice ?? '—'}</div>
+                          <div>SL: {t.stopLossPrice ?? '—'}</div>
+                          <div>TP: {t.takeProfitPrice ?? '—'}</div>
+                        </div>
+                      </div>
+                    ))}
 
-                            <div className="mt-3 flex gap-2">
-                              <button
-                                className="px-3 py-2 rounded-xl border text-sm"
-                                onClick={() => startEdit(e)}
-                                disabled={loading}
-                              >
-                                Edit notes
-                              </button>
-                            </div>
-                          </>
-                        ) : (
-                          <>
-                            <textarea
-                              className="mt-2 w-full rounded-xl border p-2 min-h-[90px]"
-                              value={editNotes}
-                              onChange={(ev) => setEditNotes(ev.target.value)}
-                              disabled={loading}
-                            />
-                            <div className="mt-3 flex gap-2">
-                              <button
-                                className="px-3 py-2 rounded-xl bg-black text-white text-sm"
-                                onClick={() => saveEdit(e.id)}
-                                disabled={loading}
-                              >
-                                {loading ? 'Saving…' : 'Save'}
-                              </button>
-                              <button
-                                className="px-3 py-2 rounded-xl border text-sm"
-                                onClick={() => {
-                                  setEditingId(null);
-                                  setEditNotes('');
-                                }}
-                                disabled={loading}
-                              >
-                                Cancel
-                              </button>
-                            </div>
-                          </>
-                        )}
+                    {tradesDay && tradesDay.trades.length > 50 && (
+                      <div className="text-xs opacity-60">
+                        Showing first 50 trades for readability.
+                      </div>
+                    )}
 
-                        {e.systemNotes?.length ? (
-                          <ul className="mt-3 list-disc pl-5 text-sm opacity-70 space-y-1">
-                            {e.systemNotes.map((n, idx) => (
-                              <li key={idx}>{n}</li>
-                            ))}
-                          </ul>
-                        ) : null}
+                    {tradesDay && tradesDay.trades.length === 0 && (
+                      <div className="text-sm opacity-70">No trades for this day.</div>
+                    )}
 
-                        {e.aiReflectionQuestions?.length ? (
-                          <div className="mt-3">
-                            <div className="text-sm font-semibold">Reflection</div>
-                            <ul className="mt-2 list-disc pl-5 text-sm opacity-70 space-y-1">
-                              {e.aiReflectionQuestions.map((q, idx) => (
-                                <li key={idx}>{q}</li>
+                    {!tradesDay && <div className="text-sm opacity-70">Trades not loaded yet.</div>}
+                  </div>
+                </div>
+
+                {/* Entries */}
+                <div className="mt-4 rounded-xl border p-3">
+                  <div className="mb-2 flex items-baseline justify-between">
+                    <div className="text-sm font-semibold">Notes & entries</div>
+                    <div className="text-xs opacity-60">{day?.entryCount ?? 0} total</div>
+                  </div>
+
+                  <div className="space-y-3">
+                    {(day?.entries ?? []).map((e) => {
+                      const isEditing = editingId === e.id;
+
+                      return (
+                        <div key={e.id} className="rounded-xl border p-3">
+                          <div className="flex items-baseline justify-between gap-3">
+                            <div className="font-semibold">{e.title}</div>
+                            <div className="text-xs opacity-60">{e.type}</div>
+                          </div>
+
+                          {!isEditing ? (
+                            <>
+                              {e.userNotes ? (
+                                <div className="mt-2 text-sm whitespace-pre-wrap">{e.userNotes}</div>
+                              ) : (
+                                <div className="mt-2 text-sm opacity-60">No notes yet.</div>
+                              )}
+
+                              <div className="mt-3 flex gap-2">
+                                <button
+                                  className="px-3 py-2 rounded-xl border text-sm"
+                                  onClick={() => startEdit(e)}
+                                  disabled={loadingDay}
+                                >
+                                  Edit notes
+                                </button>
+                              </div>
+                            </>
+                          ) : (
+                            <>
+                              <textarea
+                                className="mt-2 w-full rounded-xl border p-2 min-h-[90px]"
+                                value={editNotes}
+                                onChange={(ev) => setEditNotes(ev.target.value)}
+                                disabled={loadingDay}
+                              />
+                              <div className="mt-3 flex gap-2">
+                                <button
+                                  className="px-3 py-2 rounded-xl bg-black text-white text-sm"
+                                  onClick={() => saveEdit(e.id)}
+                                  disabled={loadingDay}
+                                >
+                                  {loadingDay ? 'Saving…' : 'Save'}
+                                </button>
+                                <button
+                                  className="px-3 py-2 rounded-xl border text-sm"
+                                  onClick={() => {
+                                    setEditingId(null);
+                                    setEditNotes('');
+                                  }}
+                                  disabled={loadingDay}
+                                >
+                                  Cancel
+                                </button>
+                              </div>
+                            </>
+                          )}
+
+                          {e.systemNotes?.length ? (
+                            <ul className="mt-3 list-disc pl-5 text-sm opacity-70 space-y-1">
+                              {e.systemNotes.map((n, idx) => (
+                                <li key={idx}>{n}</li>
                               ))}
                             </ul>
-                          </div>
-                        ) : null}
-                      </div>
-                    );
-                  })}
+                          ) : null}
 
-                  {day.entries.length === 0 && (
-                    <div className="text-sm opacity-70">No entries for this day.</div>
-                  )}
+                          {e.aiReflectionQuestions?.length ? (
+                            <div className="mt-3">
+                              <div className="text-sm font-semibold">Reflection</div>
+                              <ul className="mt-2 list-disc pl-5 text-sm opacity-70 space-y-1">
+                                {e.aiReflectionQuestions.map((q, idx) => (
+                                  <li key={idx}>{q}</li>
+                                ))}
+                              </ul>
+                            </div>
+                          ) : null}
+                        </div>
+                      );
+                    })}
+
+                    {day && day.entries.length === 0 && (
+                      <div className="text-sm opacity-70">No notes for this day yet.</div>
+                    )}
+
+                    {!day && <div className="text-sm opacity-70">Day not loaded yet.</div>}
+                  </div>
                 </div>
               </div>
             )}
