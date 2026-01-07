@@ -23,7 +23,7 @@ export default function LoginPage() {
     try {
       const res = await apiFetch<LoginResponse>('/auth/login', {
         method: 'POST',
-        body: JSON.stringify({ email, password })
+        body: { email, password }
       });
 
       setToken(res.token);
@@ -39,9 +39,7 @@ export default function LoginPage() {
     <main className="min-h-screen flex items-center justify-center p-6">
       <div className="w-full max-w-md rounded-xl border p-6 shadow-sm">
         <h1 className="text-2xl font-semibold mb-2">Log in</h1>
-        <p className="text-sm opacity-70 mb-6">
-          Sign in to view ATX and your journal.
-        </p>
+        <p className="text-sm opacity-70 mb-6">Sign in to view ATX and your journal.</p>
 
         {error && (
           <div className="mb-4 rounded-lg border border-red-300 bg-red-50 p-3 text-sm text-red-700">
@@ -59,6 +57,7 @@ export default function LoginPage() {
               placeholder="you@example.com"
               autoComplete="email"
               required
+              disabled={loading}
             />
           </div>
 
@@ -72,6 +71,7 @@ export default function LoginPage() {
               type="password"
               autoComplete="current-password"
               required
+              disabled={loading}
             />
           </div>
 
@@ -85,10 +85,24 @@ export default function LoginPage() {
           <button
             type="button"
             className="w-full rounded-lg border py-2 font-medium"
+            onClick={() => router.push('/forgot-password')}
+            disabled={loading}
+          >
+            Forgot password?
+          </button>
+
+          <button
+            type="button"
+            className="w-full rounded-lg border py-2 font-medium"
             onClick={() => router.push('/register')}
+            disabled={loading}
           >
             Need an account? Register
           </button>
+
+          <p className="text-xs opacity-60">
+            API: {process.env.NEXT_PUBLIC_API_BASE_URL || '(missing)'}
+          </p>
         </form>
       </div>
     </main>
