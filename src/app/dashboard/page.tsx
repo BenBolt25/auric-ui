@@ -94,7 +94,37 @@ export default function DashboardPage() {
   const [loading, setLoading] = useState(false);
   const [seedInfo, setSeedInfo] = useState<string | null>(null);
 
+  // Step 2 UI state
+  const [createName, setCreateName] = useState('Primary');
+  const [renameName, setRenameName] = useState('');
+  const [confirmDelete, setConfirmDelete] = useState(false);
+
   const errText = useMemo(() => (err ? toDisplayString(err) : null), [err]);
+
+  const selectedAccount = useMemo(
+    () => accounts.find((a) => a.accountId === accountId) || null,
+    [accounts, accountId]
+  );
+
+  async function fetchAccountsAndSelect(preferAccountId?: number) {
+    const list = await apiFetch<AccountsResponse>('/accounts', { auth: true });
+    const accs = list.accounts || [];
+    setAccounts(accs);
+
+    const stored = getStoredAccountId();
+    const candidate =
+      (preferAccountId && accs.find((a) => a.accountId === preferAccountId)?.accountId) ||
+      (stored && accs.find((a) => a.accountId === stored)?.accountId) ||
+      accs[0]?.accountId ||
+      0;
+
+    setAccountId(candidate);
+    if (candidate) setStoredAccountId(candidate);
+
+    // Keep rename field aligned with selected account
+    const newlySelected = accs.find((a) => a.accountId === candidate);
+    setRenameName(newlySelected?.name ?? '');
+  }
 
   async function ensureAccounts() {
     const list = await apiFetch<AccountsResponse>('/accounts', { auth: true });
@@ -116,7 +146,10 @@ export default function DashboardPage() {
       (stored && accs.find((a) => a.accountId === stored)?.accountId) || accs[0]?.accountId || 0;
 
     setAccountId(selected);
-    setStoredAccountId(selected);
+    if (selected) setStoredAccountId(selected);
+
+    const initial = accs.find((a) => a.accountId === selected);
+    setRenameName(initial?.name ?? '');
   }
 
   useEffect(() => {
@@ -180,6 +213,82 @@ export default function DashboardPage() {
     }
   }
 
+  // Step 2: create / rename / delete
+  async function createAccount() {
+    setLoading(true);
+    setErr(null);
+    setSeedInfo(null);
+    setConfirmDelete(false);
+
+    try {
+      const name = createName.trim() || 'Primary';
+      const created = await apiFetch<CreateAccountResponse>('/accounts', {
+        method: 'POST',
+        auth: true,
+        body: { name }
+      });
+
+      setCreateName('Primary');
+      await fetchAccountsAndSelect(created.account.accountId);
+    } catch (e: any) {
+      setErr(e?.message ?? e ?? 'Failed to create account');
+    } finally {
+      setLoading(false);
+    }
+  }
+
+  async function renameAccount() {
+    if (!accountId) return;
+
+    setLoading(true);
+    setErr(null);
+    setSeedInfo(null);
+
+    try {
+      const name = renameName.trim();
+      if (!name) throw new Error('Name cannot be empty');
+
+      await apiFetch<{ ok: boolean }>(`/accounts/${accountId}`, {
+        method: 'PATCH',
+        auth: true,
+        body: { name }
+      });
+
+      await fetchAccountsAndSelect(accountId);
+    } catch (e: any) {
+      setErr(e?.message ?? e ?? 'Failed to rename account');
+    } finally {
+      setLoading(false);
+    }
+  }
+
+  async function deleteAccount() {
+    if (!accountId) return;
+
+    if (!confirmDelete) {
+      setConfirmDelete(true);
+      return;
+    }
+
+    setLoading(true);
+    setErr(null);
+    setSeedInfo(null);
+
+    try {
+      await apiFetch<{ ok: boolean }>(`/accounts/${accountId}`, {
+        method: 'DELETE',
+        auth: true
+      });
+
+      setConfirmDelete(false);
+      await fetchAccountsAndSelect(undefined);
+    } catch (e: any) {
+      setErr(e?.message ?? e ?? 'Failed to delete account');
+    } finally {
+      setLoading(false);
+    }
+  }
+
   useEffect(() => {
     if (accountId) loadATX();
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -215,6 +324,7 @@ export default function DashboardPage() {
             </button>
           </header>
 
+          {/* Account + ATX Controls */}
           <div className="grid grid-cols-1 md:grid-cols-3 gap-3">
             <div className="p-3 rounded-md border">
               <div className="text-xs opacity-60 mb-1">Account</div>
@@ -225,6 +335,10 @@ export default function DashboardPage() {
                   const id = Number(e.target.value);
                   setAccountId(id);
                   setStoredAccountId(id);
+                  setConfirmDelete(false);
+
+                  const selected = accounts.find((a) => a.accountId === id);
+                  setRenameName(selected?.name ?? '');
                 }}
               >
                 <option value="" disabled>
@@ -236,10 +350,9 @@ export default function DashboardPage() {
                   </option>
                 ))}
               </select>
-
-              {!accounts.length && (
+              {selectedAccount && (
                 <div className="mt-2 text-xs opacity-60">
-                  No accounts found yet — creating one automatically should fix this.
+                  Selected: <span className="font-semibold">{selectedAccount.name}</span> (#{selectedAccount.accountId})
                 </div>
               )}
             </div>
@@ -270,6 +383,77 @@ export default function DashboardPage() {
             </div>
           </div>
 
+          {/* Step 2: Account Management */}
+          <div className="rounded-md border p-4 space-y-4">
+            <div className="text-sm font-semibold">Account management</div>
+
+            <div className="grid grid-cols-1 md:grid-cols-3 gap-3">
+              <div className="p-3 rounded-md border">
+                <div className="text-xs opacity-60 mb-1">Create new account</div>
+                <input
+                  className="w-full border rounded-md p-2"
+                  value={createName}
+                  onChange={(e) => setCreateName(e.target.value)}
+                  placeholder="Name (e.g. Primary, FTMO, Swing)"
+                />
+                <button
+                  className="mt-2 px-3 py-2 rounded-md bg-black text-white text-sm"
+                  onClick={createAccount}
+                  disabled={loading}
+                >
+                  Create
+                </button>
+              </div>
+
+              <div className="p-3 rounded-md border">
+                <div className="text-xs opacity-60 mb-1">Rename selected account</div>
+                <input
+                  className="w-full border rounded-md p-2"
+                  value={renameName}
+                  onChange={(e) => setRenameName(e.target.value)}
+                  placeholder="New name"
+                  disabled={!accountId}
+                />
+                <button
+                  className="mt-2 px-3 py-2 rounded-md border text-sm"
+                  onClick={renameAccount}
+                  disabled={loading || !accountId}
+                >
+                  Rename
+                </button>
+              </div>
+
+              <div className="p-3 rounded-md border">
+                <div className="text-xs opacity-60 mb-1">Delete selected account</div>
+                <div className="text-xs opacity-60">
+                  {confirmDelete
+                    ? 'Click delete again to confirm.'
+                    : 'This removes the account and associated state/trades.'}
+                </div>
+                <button
+                  className={[
+                    'mt-2 px-3 py-2 rounded-md text-sm',
+                    confirmDelete ? 'bg-red-600 text-white' : 'border'
+                  ].join(' ')}
+                  onClick={deleteAccount}
+                  disabled={loading || !accountId}
+                >
+                  {confirmDelete ? 'Confirm delete' : 'Delete'}
+                </button>
+                {confirmDelete && (
+                  <button
+                    className="mt-2 ml-2 px-3 py-2 rounded-md border text-sm"
+                    onClick={() => setConfirmDelete(false)}
+                    disabled={loading}
+                  >
+                    Cancel
+                  </button>
+                )}
+              </div>
+            </div>
+          </div>
+
+          {/* Actions */}
           <div className="flex flex-wrap gap-2">
             <button
               className="px-4 py-2 rounded-md bg-black text-white"
