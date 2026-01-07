@@ -14,10 +14,19 @@ type Account = {
 type AccountsResponse = { accounts: Account[] };
 type CreateAccountResponse = { account: Account };
 
+type CalendarDayDTO = {
+  date: string;
+  hasEntry: boolean;
+  types: string[];
+  hasTrades?: boolean;
+  tradeCount?: number;
+  sources?: string[];
+};
+
 type CalendarResponse = {
   accountId: number;
   month: string;
-  days: Array<{ date: string; hasEntry: boolean; types: string[] }>;
+  days: CalendarDayDTO[];
 };
 
 type JournalEntryDTO = {
@@ -214,14 +223,19 @@ export default function JournalPage() {
     setEditingId(null);
     setEditNotes('');
 
-    Promise.all([
-      loadDay(accountId, selectedDate),
-      loadTradesForDay(accountId, selectedDate)
-    ])
+    Promise.all([loadDay(accountId, selectedDate), loadTradesForDay(accountId, selectedDate)])
       .catch((e: any) => setError(e?.message ?? 'Failed to load day'))
       .finally(() => setLoadingDay(false));
   }, [accountId, selectedDate]);
 
+  // Map date -> full day object (now includes trades fields)
+  const calendarByDate = useMemo(() => {
+    const map = new Map<string, CalendarDayDTO>();
+    (calendar?.days ?? []).forEach((d) => map.set(d.date, d));
+    return map;
+  }, [calendar]);
+
+  // Keep older markers (types) for any other logic
   const markers = useMemo(() => {
     const map = new Map<string, string[]>();
     (calendar?.days ?? []).forEach((d) => map.set(d.date, d.types));
@@ -429,8 +443,14 @@ export default function JournalPage() {
               {Array.from({ length: totalDays }).map((_, i) => {
                 const dayNum = i + 1;
                 const date = `${month}-${String(dayNum).padStart(2, '0')}`;
+
+                const calDay = calendarByDate.get(date);
                 const types = markers.get(date) ?? [];
-                const has = types.length > 0;
+
+                const hasEntry = !!calDay?.hasEntry || types.length > 0;
+                const tradeCount = calDay?.tradeCount ?? 0;
+                const hasTrades = !!calDay?.hasTrades || tradeCount > 0;
+
                 const active = selectedDate === date;
 
                 return (
@@ -443,7 +463,23 @@ export default function JournalPage() {
                     ].join(' ')}
                   >
                     <div className="text-sm font-semibold">{dayNum}</div>
-                    <div className="mt-1 text-[11px] opacity-60">{has ? types.join(', ') : '—'}</div>
+
+                    <div className="mt-1 text-[11px] opacity-60">
+                      {hasEntry ? (types.length ? types.join(', ') : 'entry') : '—'}
+                    </div>
+
+                    {hasTrades ? (
+                      <div className="mt-2 flex flex-col gap-1">
+                        <div className="inline-flex items-center gap-2 text-[11px]">
+                          <span className="px-2 py-0.5 rounded-md border">{tradeCount} trades</span>
+                        </div>
+                        {(calDay?.sources?.length ?? 0) > 0 ? (
+                          <div className="text-[10px] opacity-60 truncate">
+                            {(calDay?.sources ?? []).join(', ')}
+                          </div>
+                        ) : null}
+                      </div>
+                    ) : null}
                   </button>
                 );
               })}
@@ -463,9 +499,7 @@ export default function JournalPage() {
                 <div className="rounded-xl border p-3">
                   <div className="flex items-center justify-between gap-3">
                     <div className="text-sm font-semibold">Trades</div>
-                    <div className="text-xs opacity-60">
-                      {tradesDay ? `${tradesDay.tradeCount} total` : '—'}
-                    </div>
+                    <div className="text-xs opacity-60">{tradesDay ? `${tradesDay.tradeCount} total` : '—'}</div>
                   </div>
 
                   {/* Source filters */}
@@ -532,9 +566,7 @@ export default function JournalPage() {
                     ))}
 
                     {tradesDay && tradesDay.trades.length > 50 && (
-                      <div className="text-xs opacity-60">
-                        Showing first 50 trades for readability.
-                      </div>
+                      <div className="text-xs opacity-60">Showing first 50 trades for readability.</div>
                     )}
 
                     {tradesDay && tradesDay.trades.length === 0 && (
