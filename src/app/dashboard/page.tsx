@@ -33,38 +33,41 @@ type ATXResponse = {
   };
   commentary?: {
     summary: string;
-    bulletPoints?: string[];
-    bullets?: string[];
+    bulletPoints: string[];
     reflectionQuestions?: string[];
   };
 };
 
 type TrendPoint = {
-  label: string;
-  startDate: string;
-  endDate: string;
-  tradeCount: number;
-  atx: null | {
-    score: number;
-    subscores: {
-      discipline: number;
-      riskIntegrity: number;
-      executionStability: number;
-      behaviouralVolatility: number;
-      consistency: number;
-    };
-    flags: string[];
-  };
+  startedAt: number;
+  score: number;
+  subscores?: ATXResponse['atx']['subscores'];
+  epochId?: number;
+};
+
+type EpochEvent = {
   epochId: number;
-  epochStart: boolean;
+  startedAt: number;
+  endedAt: number | null;
+  triggerFlags: string[];
+  endedReason: string | null;
+  createdAt: number;
 };
 
 type TrendResponse = {
   accountId: number;
-  period: 'daily' | 'weekly' | 'monthly';
-  lookback: number;
-  sources: string[];
+  timeframe: 'epoch' | 'weekly' | 'monthly';
   points: TrendPoint[];
+  epochs: EpochEvent[];
+};
+
+type EpochRect = {
+  key: string;
+  x: number;
+  w: number;
+  label: string;
+  endedAt: number | null;
+  reason: string | null;
 };
 
 function toDisplayString(value: unknown): string {
@@ -89,141 +92,6 @@ function toDisplayString(value: unknown): string {
   }
 }
 
-function safeBullets(c?: ATXResponse['commentary']): string[] {
-  if (!c) return [];
-  if (Array.isArray(c.bulletPoints)) return c.bulletPoints;
-  if (Array.isArray(c.bullets)) return c.bullets;
-  return [];
-}
-
-function TrendChart({
-  points,
-  height = 160
-}: {
-  points: TrendPoint[];
-  height?: number;
-}) {
-  const w = 760; // virtual width (responsive via viewBox)
-
-  const scored = points
-    .map((p) => (p.atx ? p.atx.score : null))
-    .filter((n): n is number => typeof n === 'number' && Number.isFinite(n));
-
-  const min = scored.length ? Math.min(...scored) : 0;
-  const max = scored.length ? Math.max(...scored) : 100;
-
-  const pad = 12;
-  const innerH = height - pad * 2;
-  const innerW = w - pad * 2;
-
-  function x(i: number) {
-    if (points.length <= 1) return pad;
-    return pad + (i / (points.length - 1)) * innerW;
-  }
-
-  function y(score: number) {
-    if (max === min) return pad + innerH / 2;
-    const t = (score - min) / (max - min);
-    return pad + (1 - t) * innerH;
-  }
-
-  const poly = points
-    .map((p, i) => {
-      const s = p.atx?.score;
-      if (typeof s !== 'number') return null;
-      return `${x(i)},${y(s)}`;
-    })
-    .filter(Boolean)
-    .join(' ');
-
-  const epochMarkers = points
-    .map((p, i) => (p.epochStart ? { i, epochId: p.epochId } : null))
-    .filter(Boolean) as Array<{ i: number; epochId: number }>;
-
-  return (
-    <div className="rounded-2xl border p-4">
-      <div className="flex items-baseline justify-between">
-        <div className="font-semibold">ATX Trend</div>
-        <div className="text-xs opacity-60">
-          Epoch starts marked • gaps = no trades
-        </div>
-      </div>
-
-      <div className="mt-3 w-full overflow-x-auto">
-        <svg
-          viewBox={`0 0 ${w} ${height}`}
-          className="w-full"
-          role="img"
-          aria-label="ATX trend chart"
-        >
-          {/* grid */}
-          <line x1={pad} y1={pad} x2={w - pad} y2={pad} stroke="currentColor" opacity="0.08" />
-          <line x1={pad} y1={height - pad} x2={w - pad} y2={height - pad} stroke="currentColor" opacity="0.08" />
-          <line x1={pad} y1={pad} x2={pad} y2={height - pad} stroke="currentColor" opacity="0.08" />
-          <line x1={w - pad} y1={pad} x2={w - pad} y2={height - pad} stroke="currentColor" opacity="0.08" />
-
-          {/* epoch markers */}
-          {epochMarkers.map((m) => (
-            <g key={`e-${m.i}`}>
-              <line
-                x1={x(m.i)}
-                y1={pad}
-                x2={x(m.i)}
-                y2={height - pad}
-                stroke="currentColor"
-                opacity="0.15"
-              />
-              <text
-                x={x(m.i) + 4}
-                y={pad + 12}
-                fontSize="10"
-                fill="currentColor"
-                opacity="0.5"
-              >
-                E{m.epochId}
-              </text>
-            </g>
-          ))}
-
-          {/* polyline */}
-          {poly ? (
-            <polyline
-              fill="none"
-              stroke="currentColor"
-              strokeWidth="2"
-              opacity="0.85"
-              points={poly}
-            />
-          ) : null}
-
-          {/* points */}
-          {points.map((p, i) => {
-            const s = p.atx?.score;
-            if (typeof s !== 'number') return null;
-            return (
-              <circle
-                key={`p-${i}`}
-                cx={x(i)}
-                cy={y(s)}
-                r={3}
-                fill="currentColor"
-                opacity="0.85"
-              />
-            );
-          })}
-        </svg>
-      </div>
-
-      <div className="mt-3 text-xs opacity-70 grid grid-cols-2 sm:grid-cols-4 gap-2">
-        <div>Min: {min}</div>
-        <div>Max: {max}</div>
-        <div>Points: {points.length}</div>
-        <div>Scored: {scored.length}</div>
-      </div>
-    </div>
-  );
-}
-
 export default function DashboardPage() {
   const router = useRouter();
 
@@ -234,16 +102,13 @@ export default function DashboardPage() {
   const [timeframe, setTimeframe] = useState<'epoch' | 'weekly' | 'monthly'>('epoch');
 
   const [data, setData] = useState<ATXResponse | null>(null);
+  const [trend, setTrend] = useState<TrendResponse | null>(null);
+
   const [err, setErr] = useState<unknown>(null);
   const [debugPayload, setDebugPayload] = useState<unknown>(null);
 
   const [loading, setLoading] = useState(false);
   const [seedInfo, setSeedInfo] = useState<string | null>(null);
-
-  // Trend state
-  const [trendPeriod, setTrendPeriod] = useState<'weekly' | 'monthly' | 'daily'>('weekly');
-  const [trendLookback, setTrendLookback] = useState<number>(26);
-  const [trend, setTrend] = useState<TrendResponse | null>(null);
 
   const errText = useMemo(() => (err ? toDisplayString(err) : null), [err]);
 
@@ -287,7 +152,7 @@ export default function DashboardPage() {
       const r: any = res as any;
       if (!r || typeof r !== 'object' || !r.atx || typeof r.atx.score !== 'number') {
         setDebugPayload(res);
-        setErr(`Unexpected ATX response shape.`);
+        setErr('Unexpected ATX response shape.');
         return;
       }
 
@@ -303,17 +168,15 @@ export default function DashboardPage() {
     if (!accountId) return;
 
     try {
-      const qs = new URLSearchParams();
-      qs.set('period', trendPeriod);
-      qs.set('lookback', String(trendLookback));
-      qs.set('sources', source); // tie trend to current source select
-      const res = await apiFetch<TrendResponse>(`/atx/accounts/${accountId}/trend?${qs.toString()}`, {
-        auth: true
-      });
+      // GET /atx/accounts/:accountId/trend?timeframe=weekly|monthly|epoch
+      const res = await apiFetch<TrendResponse>(
+        `/atx/accounts/${accountId}/trend?timeframe=${timeframe}`,
+        { auth: true }
+      );
       setTrend(res);
     } catch (e: any) {
-      // trend errors shouldn't kill the whole page, but show them
-      setErr(e?.message ?? e ?? 'Failed to load trend');
+      console.warn('Failed to load trend:', e?.message ?? e);
+      setTrend(null);
     }
   }
 
@@ -335,8 +198,7 @@ export default function DashboardPage() {
       );
 
       setSeedInfo(`Seeded ${res.inserted} mock trades for account ${res.accountId}.`);
-      await loadATX();
-      await loadTrend();
+      await Promise.all([loadATX(), loadTrend()]);
     } catch (e: any) {
       setErr(e?.message ?? e ?? 'Failed to seed mock trades');
     } finally {
@@ -351,16 +213,64 @@ export default function DashboardPage() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [accountId, source, timeframe]);
 
-  useEffect(() => {
-    if (!accountId) return;
-    loadTrend();
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [trendPeriod, trendLookback]);
+  const chart = useMemo(() => {
+    const pts = trend?.points ?? [];
+    const epochs = trend?.epochs ?? [];
+
+    const width = 760;
+    const height = 220;
+    const pad = 24;
+
+    if (pts.length < 2) {
+      return { width, height, svg: null as null | { poly: string; epochRects: EpochRect[]; min: number; max: number } };
+    }
+
+    const scores = pts.map((p) => p.score);
+    const min = Math.min(...scores);
+    const max = Math.max(...scores);
+    const range = Math.max(1, max - min);
+
+    const xForIndex = (i: number) =>
+      pad + (i / Math.max(1, pts.length - 1)) * (width - pad * 2);
+
+    const yForScore = (s: number) =>
+      pad + ((max - s) / range) * (height - pad * 2);
+
+    const xs = pts.map((_p, i) => xForIndex(i));
+    const poly = pts.map((p, i) => `${xs[i]},${yForScore(p.score)}`).join(' ');
+
+    const epochRects: EpochRect[] = epochs.map((e) => {
+      const startIdx = pts.findIndex((p) => p.startedAt >= e.startedAt);
+      const endedAt = e.endedAt;
+      const endIdx = endedAt == null ? -1 : pts.findIndex((p) => p.startedAt >= endedAt);
+
+      const startX = startIdx >= 0 ? xs[startIdx] : xs[0];
+      const endX = endIdx >= 0 ? xs[endIdx] : xs[xs.length - 1];
+
+      const x = Math.min(startX, endX);
+      const w = Math.max(2, Math.abs(endX - startX));
+
+      return {
+        key: `epoch-${e.epochId}`,
+        x,
+        w,
+        label: `Epoch ${e.epochId}`,
+        endedAt,
+        reason: e.endedReason
+      };
+    });
+
+    return {
+      width,
+      height,
+      svg: { poly, epochRects, min, max }
+    };
+  }, [trend]);
 
   return (
     <Protected>
       <div className="min-h-screen p-6">
-        <div className="max-w-5xl mx-auto space-y-6">
+        <div className="max-w-4xl mx-auto space-y-6">
           <header className="flex items-center justify-between">
             <div>
               <h1 className="text-2xl font-semibold">Dashboard</h1>
@@ -380,7 +290,6 @@ export default function DashboardPage() {
             </button>
           </header>
 
-          {/* Controls */}
           <div className="grid grid-cols-1 md:grid-cols-3 gap-3">
             <div className="p-3 rounded-md border">
               <div className="text-xs opacity-60 mb-1">Account</div>
@@ -429,7 +338,10 @@ export default function DashboardPage() {
           <div className="flex flex-wrap gap-2">
             <button
               className="px-4 py-2 rounded-md bg-black text-white"
-              onClick={loadATX}
+              onClick={() => {
+                loadATX();
+                loadTrend();
+              }}
               disabled={loading || !accountId}
             >
               {loading ? 'Loading…' : 'Refresh'}
@@ -439,7 +351,7 @@ export default function DashboardPage() {
               className="px-4 py-2 rounded-md border"
               onClick={seedMockTrades}
               disabled={loading || !accountId}
-              title="Seeds mock trades then refreshes ATX + trend"
+              title="Seeds mock trades, then refreshes ATX"
             >
               Seed mock trades
             </button>
@@ -447,48 +359,6 @@ export default function DashboardPage() {
             <button className="px-4 py-2 rounded-md border" onClick={() => router.push('/journal')}>
               Journal
             </button>
-          </div>
-
-          {/* Trend controls */}
-          <div className="rounded-2xl border p-4">
-            <div className="flex flex-wrap items-end gap-3">
-              <div>
-                <div className="text-xs opacity-60 mb-1">Trend period</div>
-                <select
-                  className="border rounded-md p-2"
-                  value={trendPeriod}
-                  onChange={(e) => setTrendPeriod(e.target.value as any)}
-                >
-                  <option value="weekly">weekly</option>
-                  <option value="monthly">monthly</option>
-                  <option value="daily">daily</option>
-                </select>
-              </div>
-
-              <div>
-                <div className="text-xs opacity-60 mb-1">Lookback</div>
-                <input
-                  type="number"
-                  className="border rounded-md p-2 w-28"
-                  value={trendLookback}
-                  onChange={(e) => setTrendLookback(Number(e.target.value))}
-                  min={4}
-                  max={260}
-                />
-              </div>
-
-              <button className="px-3 py-2 rounded-md border" onClick={loadTrend} disabled={!accountId}>
-                Reload trend
-              </button>
-            </div>
-
-            <div className="mt-4">
-              {trend?.points?.length ? (
-                <TrendChart points={trend.points} />
-              ) : (
-                <div className="text-sm opacity-70">Trend not loaded yet.</div>
-              )}
-            </div>
           </div>
 
           {seedInfo && !errText && (
@@ -511,7 +381,57 @@ export default function DashboardPage() {
             </div>
           )}
 
-          {!errText && !data && loading && <div className="p-3 rounded-md border">Loading…</div>}
+          {/* Trend chart */}
+          <div className="p-4 rounded-md border">
+            <div className="flex items-baseline justify-between">
+              <div>
+                <div className="text-sm font-semibold">ATX Trend</div>
+                <div className="text-xs opacity-60">
+                  {trend?.points?.length ? `${trend.points.length} points` : 'No points yet'}
+                </div>
+              </div>
+              <div className="text-xs opacity-60">Epochs shown as shaded regions</div>
+            </div>
+
+            <div className="mt-3 overflow-x-auto">
+              {chart.svg ? (
+                <svg
+                  width={chart.width}
+                  height={chart.height}
+                  viewBox={`0 0 ${chart.width} ${chart.height}`}
+                  className="block"
+                >
+                  {/* Epoch shaded regions */}
+                  {chart.svg.epochRects.map((r: EpochRect) => (
+                    <g key={r.key}>
+                      <rect x={r.x} y={0} width={r.w} height={chart.height} opacity={0.08} />
+                      <line x1={r.x} y1={0} x2={r.x} y2={chart.height} opacity={0.25} strokeWidth={1} />
+                    </g>
+                  ))}
+
+                  {/* Trend */}
+                  <polyline
+                    fill="none"
+                    stroke="currentColor"
+                    strokeWidth={2}
+                    points={chart.svg.poly}
+                    opacity={0.9}
+                  />
+
+                  <text x={8} y={16} fontSize={11} opacity={0.6}>
+                    max: {chart.svg.max}
+                  </text>
+                  <text x={8} y={chart.height - 8} fontSize={11} opacity={0.6}>
+                    min: {chart.svg.min}
+                  </text>
+                </svg>
+              ) : (
+                <div className="text-sm opacity-70">
+                  Not enough trend data yet. Seed trades and refresh a few times (or wait for weekly/monthly points).
+                </div>
+              )}
+            </div>
+          </div>
 
           {data && (
             <div className="space-y-4">
@@ -522,21 +442,15 @@ export default function DashboardPage() {
                 </div>
 
                 <div className="mt-3 grid grid-cols-1 md:grid-cols-2 gap-2 text-sm">
-                  <div className="p-3 rounded-md bg-black/5">
-                    Discipline: {data.atx.subscores.discipline}
-                  </div>
-                  <div className="p-3 rounded-md bg-black/5">
-                    Risk Integrity: {data.atx.subscores.riskIntegrity}
-                  </div>
+                  <div className="p-3 rounded-md bg-black/5">Discipline: {data.atx.subscores.discipline}</div>
+                  <div className="p-3 rounded-md bg-black/5">Risk Integrity: {data.atx.subscores.riskIntegrity}</div>
                   <div className="p-3 rounded-md bg-black/5">
                     Execution Stability: {data.atx.subscores.executionStability}
                   </div>
                   <div className="p-3 rounded-md bg-black/5">
                     Behavioural Volatility: {data.atx.subscores.behaviouralVolatility}
                   </div>
-                  <div className="p-3 rounded-md bg-black/5">
-                    Consistency: {data.atx.subscores.consistency}
-                  </div>
+                  <div className="p-3 rounded-md bg-black/5">Consistency: {data.atx.subscores.consistency}</div>
                 </div>
 
                 {data.atx.flags?.length ? (
@@ -557,9 +471,9 @@ export default function DashboardPage() {
                 <div className="p-4 rounded-md border">
                   <h3 className="font-semibold">Commentary</h3>
                   <p className="mt-2 text-sm">{data.commentary.summary}</p>
-                  {safeBullets(data.commentary).length ? (
+                  {data.commentary.bulletPoints?.length ? (
                     <ul className="mt-2 text-sm list-disc pl-5 space-y-1">
-                      {safeBullets(data.commentary).map((b, i) => (
+                      {data.commentary.bulletPoints.map((b, i) => (
                         <li key={i}>{b}</li>
                       ))}
                     </ul>
