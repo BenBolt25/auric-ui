@@ -5,14 +5,20 @@ import Protected from '@/components/Protected';
 import { apiFetch } from '@/lib/api';
 import { useRouter } from 'next/navigation';
 
+type AccountRaw = {
+  accountId: number | string;
+  name: string;
+  createdAt: number | string;
+};
+
 type Account = {
   accountId: number;
   name: string;
   createdAt: number;
 };
 
-type AccountsResponse = { accounts: Account[] };
-type CreateAccountResponse = { account: Account };
+type AccountsResponse = { accounts: AccountRaw[] };
+type CreateAccountResponse = { account: AccountRaw };
 
 type CalendarResponse = {
   accountId: number;
@@ -92,6 +98,19 @@ function daysInMonth(year: number, monthIndex: number) {
   return new Date(year, monthIndex + 1, 0).getDate();
 }
 
+function toNum(v: unknown, fallback = 0): number {
+  const n = typeof v === 'number' ? v : typeof v === 'string' ? Number(v) : NaN;
+  return Number.isFinite(n) ? n : fallback;
+}
+
+function normalizeAccount(a: AccountRaw): Account {
+  return {
+    accountId: toNum(a.accountId),
+    name: String(a.name ?? 'Primary'),
+    createdAt: toNum(a.createdAt)
+  };
+}
+
 function getStoredAccountId(): number | null {
   if (typeof window === 'undefined') return null;
   const raw = window.localStorage.getItem(SELECTED_ACCOUNT_KEY);
@@ -151,7 +170,7 @@ export default function JournalPage() {
 
   async function ensureAccounts() {
     const list = await apiFetch<AccountsResponse>('/accounts', { auth: true });
-    let accs = list.accounts || [];
+    let accs = (list.accounts || []).map(normalizeAccount).filter((a) => a.accountId > 0);
 
     if (!accs.length) {
       const created = await apiFetch<CreateAccountResponse>('/accounts', {
@@ -159,7 +178,7 @@ export default function JournalPage() {
         auth: true,
         body: { name: 'Primary' }
       });
-      accs = [created.account];
+      accs = [normalizeAccount(created.account)];
     }
 
     setAccounts(accs);
@@ -197,10 +216,12 @@ export default function JournalPage() {
     setTradesDay(res);
   }
 
-  async function loadATXForDay(aid: number, date: string, src: 'mock' | 'live') {
+  // ✅ UPDATED: sources passed through to ATX day endpoint
+  async function loadATXForDay(aid: number, date: string, src: 'mock' | 'live', sources?: string[]) {
     const qs = new URLSearchParams();
     qs.set('date', date);
     qs.set('source', src);
+    if (sources && sources.length) qs.set('sources', sources.join(','));
 
     const res = await apiFetch<ATXDayResponse>(`/atx/accounts/${aid}/day?${qs.toString()}`, {
       auth: true
@@ -224,7 +245,6 @@ export default function JournalPage() {
     setAtxDay(null);
 
     setSelectedSources([]);
-
     setEditingId(null);
     setEditNotes('');
     setNewTitle('');
@@ -275,24 +295,37 @@ export default function JournalPage() {
     return Array.from(set).sort();
   }, [tradesDay]);
 
-  async function toggleSource(source: string) {
+  async function refreshDayViews(nextSources: string[]) {
     if (!accountId || !selectedDate) return;
-
-    let next: string[];
-    if (selectedSources.includes(source)) next = selectedSources.filter((s) => s !== source);
-    else next = [...selectedSources, source];
-
-    setSelectedSources(next);
-
     setLoadingDay(true);
     setError(null);
     try {
-      await loadTradesForDay(accountId, selectedDate, next.length ? next : undefined);
+      const srcs = nextSources.length ? nextSources : undefined;
+      await Promise.all([
+        loadTradesForDay(accountId, selectedDate, srcs),
+        loadATXForDay(accountId, selectedDate, atxSource, srcs)
+      ]);
     } catch (e: any) {
-      setError(e?.message ?? 'Failed to load trades');
+      setError(e?.message ?? 'Failed to refresh day');
     } finally {
       setLoadingDay(false);
     }
+  }
+
+  async function toggleSource(source: string) {
+    if (!accountId || !selectedDate) return;
+
+    const next = selectedSources.includes(source)
+      ? selectedSources.filter((s) => s !== source)
+      : [...selectedSources, source];
+
+    setSelectedSources(next);
+    await refreshDayViews(next);
+  }
+
+  async function clearSourceFilters() {
+    setSelectedSources([]);
+    await refreshDayViews([]);
   }
 
   async function createEntry() {
@@ -367,9 +400,7 @@ export default function JournalPage() {
         <header className="flex items-center justify-between">
           <div>
             <h1 className="text-2xl font-semibold">Journal</h1>
-            <p className="text-sm opacity-70">
-              Trades are automatic (by source). Notes/reflections sit on top.
-            </p>
+            <p className="text-sm opacity-70">Trades are automatic (by source). Notes/reflections sit on top.</p>
           </div>
           <button className="rounded-xl border px-4 py-2" onClick={() => router.push('/dashboard')}>
             Back
@@ -463,9 +494,7 @@ export default function JournalPage() {
             {(loadingCalendar || loadingDay) && <div className="text-sm opacity-70">Loading…</div>}
 
             {error && (
-              <div className="rounded-xl border border-red-300 bg-red-50 p-3 text-sm text-red-800">
-                {error}
-              </div>
+              <div className="rounded-xl border border-red-300 bg-red-50 p-3 text-sm text-red-800">{error}</div>
             )}
           </div>
 
@@ -476,7 +505,6 @@ export default function JournalPage() {
                 const dayNum = i + 1;
                 const date = `${month}-${String(dayNum).padStart(2, '0')}`;
                 const types = markers.get(date) ?? [];
-                const has = types.length > 0;
                 const active = selectedDate === date;
 
                 return (
@@ -489,7 +517,7 @@ export default function JournalPage() {
                     ].join(' ')}
                   >
                     <div className="text-sm font-semibold">{dayNum}</div>
-                    <div className="mt-1 text-[11px] opacity-60">{has ? types.join(', ') : '—'}</div>
+                    <div className="mt-1 text-[11px] opacity-60">{types.length ? types.join(', ') : '—'}</div>
                   </button>
                 );
               })}
@@ -504,11 +532,14 @@ export default function JournalPage() {
                   </div>
                 </div>
 
-                {/* ATX micro-summary */}
+                {/* ✅ ATX micro-summary (above trades) */}
                 <div className="rounded-xl border p-3">
                   <div className="flex items-center justify-between">
                     <div className="text-sm font-semibold">ATX for this day</div>
-                    <div className="text-xs opacity-60">{atxSource}</div>
+                    <div className="text-xs opacity-60">
+                      {atxSource}
+                      {selectedSources.length ? ` • ${selectedSources.join(', ')}` : ''}
+                    </div>
                   </div>
 
                   {atxDay ? (
@@ -539,9 +570,7 @@ export default function JournalPage() {
                       )}
                     </div>
                   ) : (
-                    <div className="mt-2 text-sm opacity-70">
-                      ATX day summary not loaded (or endpoint missing).
-                    </div>
+                    <div className="mt-2 text-sm opacity-70">ATX day summary not loaded (or endpoint missing).</div>
                   )}
                 </div>
 
@@ -565,6 +594,7 @@ export default function JournalPage() {
                             ].join(' ')}
                             onClick={() => toggleSource(s)}
                             disabled={loadingDay}
+                            title="Toggle source filter"
                           >
                             {s}
                           </button>
@@ -573,17 +603,9 @@ export default function JournalPage() {
                       {selectedSources.length > 0 && (
                         <button
                           className="px-3 py-1.5 rounded-xl border text-xs"
-                          onClick={async () => {
-                            if (!accountId || !selectedDate) return;
-                            setSelectedSources([]);
-                            setLoadingDay(true);
-                            try {
-                              await loadTradesForDay(accountId, selectedDate);
-                            } finally {
-                              setLoadingDay(false);
-                            }
-                          }}
+                          onClick={clearSourceFilters}
                           disabled={loadingDay}
+                          title="Clear filters"
                         >
                           Clear
                         </button>
@@ -612,14 +634,8 @@ export default function JournalPage() {
                       </div>
                     ))}
 
-                    {tradesDay && tradesDay.trades.length > 50 && (
-                      <div className="text-xs opacity-60">Showing first 50 trades.</div>
-                    )}
-
-                    {tradesDay && tradesDay.trades.length === 0 && (
-                      <div className="text-sm opacity-70">No trades for this day.</div>
-                    )}
-
+                    {tradesDay && tradesDay.trades.length > 50 && <div className="text-xs opacity-60">Showing first 50 trades.</div>}
+                    {tradesDay && tradesDay.trades.length === 0 && <div className="text-sm opacity-70">No trades for this day.</div>}
                     {!tradesDay && <div className="text-sm opacity-70">Trades not loaded yet.</div>}
                   </div>
                 </div>
@@ -651,11 +667,7 @@ export default function JournalPage() {
                               )}
 
                               <div className="mt-3 flex gap-2">
-                                <button
-                                  className="px-3 py-2 rounded-xl border text-sm"
-                                  onClick={() => startEdit(e)}
-                                  disabled={loadingDay}
-                                >
+                                <button className="px-3 py-2 rounded-xl border text-sm" onClick={() => startEdit(e)} disabled={loadingDay}>
                                   Edit notes
                                 </button>
                               </div>
@@ -693,10 +705,7 @@ export default function JournalPage() {
                       );
                     })}
 
-                    {day && day.entries.length === 0 && (
-                      <div className="text-sm opacity-70">No notes for this day yet.</div>
-                    )}
-
+                    {day && day.entries.length === 0 && <div className="text-sm opacity-70">No notes for this day yet.</div>}
                     {!day && <div className="text-sm opacity-70">Day not loaded yet.</div>}
                   </div>
                 </div>
