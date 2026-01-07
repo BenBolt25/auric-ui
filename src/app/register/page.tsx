@@ -7,11 +7,6 @@ import { setToken } from '@/lib/auth';
 
 type RegisterResponse = { token: string };
 
-function isAccountExistsError(err: unknown): boolean {
-  const msg = (err as any)?.message;
-  return typeof msg === 'string' && msg.includes('ACCOUNT_EXISTS');
-}
-
 export default function RegisterPage() {
   const router = useRouter();
   const [email, setEmail] = useState('');
@@ -19,12 +14,12 @@ export default function RegisterPage() {
 
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  const [accountExists, setAccountExists] = useState(false);
+  const [emailExists, setEmailExists] = useState(false);
 
   async function onSubmit(e: React.FormEvent) {
     e.preventDefault();
     setError(null);
-    setAccountExists(false);
+    setEmailExists(false);
     setLoading(true);
 
     try {
@@ -36,8 +31,8 @@ export default function RegisterPage() {
       setToken(res.token);
       router.push('/dashboard');
     } catch (err: any) {
-      if (isAccountExistsError(err)) {
-        setAccountExists(true);
+      if (err?.status === 409) {
+        setEmailExists(true);
         setError('An account already exists for this email.');
       } else {
         setError(err?.message ?? 'Register failed');
@@ -55,37 +50,9 @@ export default function RegisterPage() {
           Register to access your ATX dashboard and journal.
         </p>
 
-        {error && !accountExists && (
+        {error && (
           <div className="mb-4 rounded-lg border border-red-300 bg-red-50 p-3 text-sm text-red-700">
             {error}
-          </div>
-        )}
-
-        {accountExists && (
-          <div className="mb-4 rounded-lg border border-amber-300 bg-amber-50 p-3 text-sm text-amber-900">
-            <div className="font-semibold">Account already exists</div>
-            <div className="mt-1 opacity-80">
-              Use <span className="font-medium">Sign in</span> or reset your password.
-            </div>
-
-            <div className="mt-3 flex gap-2">
-              <button
-                type="button"
-                className="rounded-lg bg-black text-white px-3 py-2 text-sm"
-                onClick={() => router.push('/login')}
-              >
-                Sign in
-              </button>
-
-              <button
-                type="button"
-                className="rounded-lg border px-3 py-2 text-sm"
-                onClick={() => router.push('/forgot-password')}
-                title="We can wire this page next"
-              >
-                Forgot password
-              </button>
-            </div>
           </div>
         )}
 
@@ -99,7 +66,6 @@ export default function RegisterPage() {
               placeholder="you@example.com"
               autoComplete="email"
               required
-              disabled={loading}
             />
           </div>
 
@@ -113,7 +79,6 @@ export default function RegisterPage() {
               type="password"
               autoComplete="new-password"
               required
-              disabled={loading}
             />
           </div>
 
@@ -128,14 +93,30 @@ export default function RegisterPage() {
             API: {process.env.NEXT_PUBLIC_API_BASE_URL || '(missing)'}
           </p>
 
+          {/* Primary navigation */}
           <button
             type="button"
             className="w-full rounded-lg border py-2 font-medium"
             onClick={() => router.push('/login')}
-            disabled={loading}
           >
             Already have an account? Log in
           </button>
+
+          {/* Show this always (or only when emailExists=true if you prefer) */}
+          <button
+            type="button"
+            className="w-full rounded-lg border py-2 font-medium"
+            onClick={() => router.push('/forgot-password')}
+          >
+            Forgot password
+          </button>
+
+          {/* Optional: if you only want it when 409 happens, wrap with: {emailExists && (...)} */}
+          {emailExists && (
+            <div className="text-xs opacity-70">
+              Tip: use “Log in” or “Forgot password” to regain access.
+            </div>
+          )}
         </form>
       </div>
     </main>

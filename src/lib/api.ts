@@ -1,63 +1,142 @@
-import { getToken } from './auth';
+// auric-ui/src/lib/api.ts
+import { getToken } from '@/lib/auth';
 
-export type ApiFetchOptions = {
-  method?: 'GET' | 'POST' | 'PATCH' | 'PUT' | 'DELETE';
-  body?: any;
-  auth?: boolean; // ✅ allow { auth: true }
+export class ApiError extends Error {
+  status: number;
+  statusText: string;
+  url: string;
+  json: unknown | null;
+  bodyText: string | null;
+
+  constructor(args: {
+    message: string;
+    status: number;
+    statusText: string;
+    url: string;
+    json?: unknown | null;
+    bodyText?: string | null;
+  }) {
+    super(args.message);
+    this.name = 'ApiError';
+    this.status = args.status;
+    this.statusText = args.statusText;
+    this.url = args.url;
+    this.json = args.json ?? null;
+    this.bodyText = args.bodyText ?? null;
+  }
+}
+
+type ApiFetchOptions = {
+  method?: string;
+  auth?: boolean;
+  body?: any; // object | string | FormData
   headers?: Record<string, string>;
+  signal?: AbortSignal;
 };
 
-const API_BASE =
-  process.env.NEXT_PUBLIC_API_BASE_URL?.replace(/\/+$/, '') || '';
+function joinUrl(base: string, path: string) {
+  if (!base) return path;
+  if (base.endsWith('/') && path.startsWith('/')) return base.slice(0, -1) + path;
+  if (!base.endsWith('/') && !path.startsWith('/')) return base + '/' + path;
+  return base + path;
+}
 
-function buildHeaders(opts?: ApiFetchOptions): Record<string, string> {
+export async function apiFetch<T = any>(path: string, opts: ApiFetchOptions = {}): Promise<T> {
+  const base = process.env.NEXT_PUBLIC_API_BASE_URL || '';
+  const url = joinUrl(base, path);
+
+  const method = (opts.method || 'GET').toUpperCase();
+
   const headers: Record<string, string> = {
-    'Content-Type': 'application/json',
-    ...(opts?.headers || {})
+    ...(opts.headers || {})
   };
 
-  if (opts?.auth) {
+  if (opts.auth) {
     const token = getToken();
     if (token) headers.Authorization = `Bearer ${token}`;
   }
 
-  return headers;
-}
+  let body: BodyInit | undefined = undefined;
 
-export async function apiFetch<T>(path: string, opts?: ApiFetchOptions): Promise<T> {
-  if (!API_BASE) {
-    throw new Error(
-      'NEXT_PUBLIC_API_BASE_URL is missing. Set it in .env.local (e.g. https://aurix-zero.onrender.com)'
-    );
+  // If body is already a string or FormData, pass through.
+  if (opts.body != null) {
+    if (typeof opts.body === 'string') {
+      body = opts.body;
+      // If they gave us a raw JSON string and didn't set content-type, default it.
+      if (!headers['Content-Type']) headers['Content-Type'] = 'application/json';
+    } else if (typeof FormData !== 'undefined' && opts.body instanceof FormData) {
+      body = opts.body;
+      // Don't set Content-Type for FormData (browser sets boundary)
+    } else {
+      body = JSON.stringify(opts.body);
+      if (!headers['Content-Type']) headers['Content-Type'] = 'application/json';
+    }
   }
 
-  const url = `${API_BASE}${path.startsWith('/') ? path : `/${path}`}`;
-
-console.log('[apiFetch] body type:', typeof opts?.body, 'value:', opts?.body);
-  
   const res = await fetch(url, {
-    method: opts?.method || 'GET',
-    headers: buildHeaders(opts),
-    body: opts?.body !== undefined 
-  ? (typeof opts.body === 'string' ? opts.body : JSON.stringify(opts.body)) 
-  : undefined
+    method,
+    headers,
+    body,
+    signal: opts.signal
   });
 
-  const text = await res.text();
-  let json: any = null;
+  // Try to parse body (json preferred, fallback to text)
+  const ct = res.headers.get('content-type') || '';
+  const isJson = ct.includes('application/json') || ct.includes('+json');
+
+  let parsedJson: unknown | null = null;
+  let parsedText: string | null = null;
+
   try {
-    json = text ? JSON.parse(text) : null;
+    if (isJson) {
+      parsedJson = await res.json();
+    } else {
+      parsedText = await res.text();
+      // Sometimes APIs return JSON without the header
+      if (parsedText && parsedText.trim().startsWith('{')) {
+        try {
+          parsedJson = JSON.parse(parsedText);
+        } catch {
+          // keep as text
+        }
+      }
+    }
   } catch {
-    // non-json response
+    // ignore parse errors
   }
 
   if (!res.ok) {
     const msg =
-      (json && (json.error || json.message)) ||
-      text ||
-      `Request failed: ${res.status} ${res.statusText}`;
-    throw new Error(msg);
+      (parsedJson && typeof parsedJson === 'object' && parsedJson !== null && 'error' in parsedJson
+        ? String((parsedJson as any).error)
+        : null) ||
+      (parsedJson && typeof parsedJson === 'object' && parsedJson !== null && 'message' in parsedJson
+        ? String((parsedJson as any).message)
+        : null) ||
+      parsedText ||
+      `Request failed (${res.status})`;
+
+    throw new ApiError({
+      message: msg,
+      status: res.status,
+      statusText: res.statusText,
+      url,
+      json: parsedJson,
+      bodyText: parsedText
+    });
   }
 
-  return (json ?? ({} as any)) as T;
+  // No content
+  if (res.status === 204) return undefined as any;
+
+  // Return JSON if we have it, otherwise text
+  if (parsedJson != null) return parsedJson as T;
+  if (parsedText != null && parsedText.length) return parsedText as any;
+
+  // As a last resort, try json again
+  try {
+    return (await res.json()) as T;
+  } catch {
+    return undefined as any;
+  }
 }
