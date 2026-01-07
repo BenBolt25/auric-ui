@@ -7,6 +7,11 @@ import { setToken } from '@/lib/auth';
 
 type RegisterResponse = { token: string };
 
+function isAccountExistsError(err: unknown): boolean {
+  const msg = (err as any)?.message;
+  return typeof msg === 'string' && msg.includes('ACCOUNT_EXISTS');
+}
+
 export default function RegisterPage() {
   const router = useRouter();
   const [email, setEmail] = useState('');
@@ -14,10 +19,12 @@ export default function RegisterPage() {
 
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [accountExists, setAccountExists] = useState(false);
 
   async function onSubmit(e: React.FormEvent) {
     e.preventDefault();
     setError(null);
+    setAccountExists(false);
     setLoading(true);
 
     try {
@@ -29,7 +36,12 @@ export default function RegisterPage() {
       setToken(res.token);
       router.push('/dashboard');
     } catch (err: any) {
-      setError(err?.message ?? 'Register failed');
+      if (isAccountExistsError(err)) {
+        setAccountExists(true);
+        setError('An account already exists for this email.');
+      } else {
+        setError(err?.message ?? 'Register failed');
+      }
     } finally {
       setLoading(false);
     }
@@ -43,9 +55,37 @@ export default function RegisterPage() {
           Register to access your ATX dashboard and journal.
         </p>
 
-        {error && (
+        {error && !accountExists && (
           <div className="mb-4 rounded-lg border border-red-300 bg-red-50 p-3 text-sm text-red-700">
             {error}
+          </div>
+        )}
+
+        {accountExists && (
+          <div className="mb-4 rounded-lg border border-amber-300 bg-amber-50 p-3 text-sm text-amber-900">
+            <div className="font-semibold">Account already exists</div>
+            <div className="mt-1 opacity-80">
+              Use <span className="font-medium">Sign in</span> or reset your password.
+            </div>
+
+            <div className="mt-3 flex gap-2">
+              <button
+                type="button"
+                className="rounded-lg bg-black text-white px-3 py-2 text-sm"
+                onClick={() => router.push('/login')}
+              >
+                Sign in
+              </button>
+
+              <button
+                type="button"
+                className="rounded-lg border px-3 py-2 text-sm"
+                onClick={() => router.push('/forgot-password')}
+                title="We can wire this page next"
+              >
+                Forgot password
+              </button>
+            </div>
           </div>
         )}
 
@@ -59,6 +99,7 @@ export default function RegisterPage() {
               placeholder="you@example.com"
               autoComplete="email"
               required
+              disabled={loading}
             />
           </div>
 
@@ -72,6 +113,7 @@ export default function RegisterPage() {
               type="password"
               autoComplete="new-password"
               required
+              disabled={loading}
             />
           </div>
 
@@ -81,13 +123,16 @@ export default function RegisterPage() {
           >
             {loading ? 'Creating…' : 'Register'}
           </button>
-<p className="text-xs opacity-60">
-  API: {process.env.NEXT_PUBLIC_API_BASE_URL || '(missing)'}
-</p>
+
+          <p className="text-xs opacity-60">
+            API: {process.env.NEXT_PUBLIC_API_BASE_URL || '(missing)'}
+          </p>
+
           <button
             type="button"
             className="w-full rounded-lg border py-2 font-medium"
             onClick={() => router.push('/login')}
+            disabled={loading}
           >
             Already have an account? Log in
           </button>
