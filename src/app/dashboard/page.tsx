@@ -17,7 +17,6 @@ type CreateAccountResponse = { account: Account };
 
 type CommentaryPayload = {
   summary: string;
-  // Backend currently returns `bullets`, older UI expected `bulletPoints`
   bullets?: string[];
   bulletPoints?: string[];
   reflectionQuestions?: string[];
@@ -41,6 +40,21 @@ type ATXResponse = {
   };
   commentary?: CommentaryPayload;
 };
+
+const SELECTED_ACCOUNT_KEY = 'auric_selected_account_id';
+
+function getStoredAccountId(): number | null {
+  if (typeof window === 'undefined') return null;
+  const raw = window.localStorage.getItem(SELECTED_ACCOUNT_KEY);
+  const n = raw ? Number(raw) : NaN;
+  return Number.isFinite(n) && n > 0 ? n : null;
+}
+
+function setStoredAccountId(id: number) {
+  if (typeof window === 'undefined') return;
+  if (!id) return;
+  window.localStorage.setItem(SELECTED_ACCOUNT_KEY, String(id));
+}
 
 function toDisplayString(value: unknown): string {
   if (value == null) return '';
@@ -97,8 +111,12 @@ export default function DashboardPage() {
 
     setAccounts(accs);
 
-    // If we don't have an accountId selected yet, select the first
-    setAccountId((prev) => (prev ? prev : accs[0]?.accountId ?? 0));
+    const stored = getStoredAccountId();
+    const selected =
+      (stored && accs.find((a) => a.accountId === stored)?.accountId) || accs[0]?.accountId || 0;
+
+    setAccountId(selected);
+    setStoredAccountId(selected);
   }
 
   useEffect(() => {
@@ -203,7 +221,11 @@ export default function DashboardPage() {
               <select
                 className="w-full border rounded-md p-2"
                 value={accountId || ''}
-                onChange={(e) => setAccountId(Number(e.target.value))}
+                onChange={(e) => {
+                  const id = Number(e.target.value);
+                  setAccountId(id);
+                  setStoredAccountId(id);
+                }}
               >
                 <option value="" disabled>
                   Select…
