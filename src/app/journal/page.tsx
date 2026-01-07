@@ -39,7 +39,7 @@ type DayResponse = {
 };
 
 type TradeDTO = {
-  source: string; // unified trades endpoint
+  source: string;
   tradeId: string;
   accountId: number;
   instrument?: string;
@@ -61,28 +61,25 @@ type TradesDayResponse = {
   trades: TradeDTO[];
 };
 
+type ATXSnapshot = {
+  score: number;
+  subscores: {
+    discipline: number;
+    riskIntegrity: number;
+    executionStability: number;
+    behaviouralVolatility: number;
+    consistency: number;
+  };
+  flags: string[];
+  profiles?: string[];
+};
+
 type ATXDayResponse = {
   accountId: number;
   date: string;
-  sources: string[];
+  source: 'mock' | 'live';
   tradeCount: number;
-  atx: null | {
-    score: number;
-    subscores: {
-      discipline: number;
-      riskIntegrity: number;
-      executionStability: number;
-      behaviouralVolatility: number;
-      consistency: number;
-    };
-    flags: string[];
-  };
-  commentary: null | {
-    summary: string;
-    bulletPoints?: string[];
-    bullets?: string[]; // backend might return either key
-    reflectionQuestions?: string[];
-  };
+  atx: ATXSnapshot;
 };
 
 const SELECTED_ACCOUNT_KEY = 'auric_selected_account_id';
@@ -109,7 +106,6 @@ function setStoredAccountId(id: number) {
 }
 
 function createdAtForDate(dateYYYYMMDD: string): number {
-  // Pin to noon UTC so it reliably falls on the selected date
   const ms = Date.parse(`${dateYYYYMMDD}T12:00:00.000Z`);
   return Number.isFinite(ms) ? ms : Date.now();
 }
@@ -120,13 +116,6 @@ function fmtTime(ms: number) {
   } catch {
     return String(ms);
   }
-}
-
-function safeBullets(c: ATXDayResponse['commentary']): string[] {
-  if (!c) return [];
-  if (Array.isArray(c.bulletPoints)) return c.bulletPoints;
-  if (Array.isArray(c.bullets)) return c.bullets;
-  return [];
 }
 
 export default function JournalPage() {
@@ -142,6 +131,8 @@ export default function JournalPage() {
 
   const [day, setDay] = useState<DayResponse | null>(null);
   const [tradesDay, setTradesDay] = useState<TradesDayResponse | null>(null);
+
+  const [atxSource, setAtxSource] = useState<'mock' | 'live'>('mock');
   const [atxDay, setAtxDay] = useState<ATXDayResponse | null>(null);
 
   const [selectedSources, setSelectedSources] = useState<string[]>([]); // empty => all
@@ -150,7 +141,7 @@ export default function JournalPage() {
   const [loadingCalendar, setLoadingCalendar] = useState(false);
   const [loadingDay, setLoadingDay] = useState(false);
 
-  // Notes form (NOT trades)
+  // Notes form
   const [newTitle, setNewTitle] = useState('');
   const [newNotes, setNewNotes] = useState('');
 
@@ -206,10 +197,10 @@ export default function JournalPage() {
     setTradesDay(res);
   }
 
-  async function loadATXForDay(aid: number, date: string, sources?: string[]) {
+  async function loadATXForDay(aid: number, date: string, src: 'mock' | 'live') {
     const qs = new URLSearchParams();
     qs.set('date', date);
-    if (sources && sources.length) qs.set('sources', sources.join(','));
+    qs.set('source', src);
 
     const res = await apiFetch<ATXDayResponse>(`/atx/accounts/${aid}/day?${qs.toString()}`, {
       auth: true
@@ -222,7 +213,6 @@ export default function JournalPage() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
-  // Load calendar when account/month changes
   useEffect(() => {
     if (!accountId) return;
 
@@ -232,6 +222,7 @@ export default function JournalPage() {
     setDay(null);
     setTradesDay(null);
     setAtxDay(null);
+
     setSelectedSources([]);
 
     setEditingId(null);
@@ -245,7 +236,6 @@ export default function JournalPage() {
       .finally(() => setLoadingCalendar(false));
   }, [accountId, month]);
 
-  // Load day + trades + day-ATX when selectedDate changes
   useEffect(() => {
     if (!accountId || !selectedDate) return;
 
@@ -255,18 +245,19 @@ export default function JournalPage() {
     setDay(null);
     setTradesDay(null);
     setAtxDay(null);
-    setSelectedSources([]); // default "all sources" when switching day
+
+    setSelectedSources([]);
     setEditingId(null);
     setEditNotes('');
 
     Promise.all([
       loadDay(accountId, selectedDate),
       loadTradesForDay(accountId, selectedDate),
-      loadATXForDay(accountId, selectedDate)
+      loadATXForDay(accountId, selectedDate, atxSource)
     ])
       .catch((e: any) => setError(e?.message ?? 'Failed to load day'))
       .finally(() => setLoadingDay(false));
-  }, [accountId, selectedDate]);
+  }, [accountId, selectedDate, atxSource]);
 
   const markers = useMemo(() => {
     const map = new Map<string, string[]>();
@@ -288,40 +279,17 @@ export default function JournalPage() {
     if (!accountId || !selectedDate) return;
 
     let next: string[];
-    if (selectedSources.includes(source)) {
-      next = selectedSources.filter((s) => s !== source);
-    } else {
-      next = [...selectedSources, source];
-    }
+    if (selectedSources.includes(source)) next = selectedSources.filter((s) => s !== source);
+    else next = [...selectedSources, source];
 
     setSelectedSources(next);
 
     setLoadingDay(true);
     setError(null);
-
     try {
-      const filter = next.length ? next : undefined;
-      await Promise.all([
-        loadTradesForDay(accountId, selectedDate, filter),
-        loadATXForDay(accountId, selectedDate, filter)
-      ]);
+      await loadTradesForDay(accountId, selectedDate, next.length ? next : undefined);
     } catch (e: any) {
-      setError(e?.message ?? 'Failed to load trades/ATX');
-    } finally {
-      setLoadingDay(false);
-    }
-  }
-
-  async function clearFilters() {
-    if (!accountId || !selectedDate) return;
-    setSelectedSources([]);
-    setLoadingDay(true);
-    setError(null);
-    try {
-      await Promise.all([
-        loadTradesForDay(accountId, selectedDate),
-        loadATXForDay(accountId, selectedDate)
-      ]);
+      setError(e?.message ?? 'Failed to load trades');
     } finally {
       setLoadingDay(false);
     }
@@ -330,7 +298,6 @@ export default function JournalPage() {
   async function createEntry() {
     if (!accountId || !selectedDate) return;
 
-    // Notes-only entry
     const title = newTitle.trim() || 'Notes';
     const notes = newNotes.trim();
 
@@ -401,7 +368,7 @@ export default function JournalPage() {
           <div>
             <h1 className="text-2xl font-semibold">Journal</h1>
             <p className="text-sm opacity-70">
-              Trades are automatic (by source). Journal entries are your notes/reflections layered on top.
+              Trades are automatic (by source). Notes/reflections sit on top.
             </p>
           </div>
           <button className="rounded-xl border px-4 py-2" onClick={() => router.push('/dashboard')}>
@@ -410,7 +377,7 @@ export default function JournalPage() {
         </header>
 
         <section className="mt-6 grid gap-4 lg:grid-cols-3">
-          {/* Left: controls + notes */}
+          {/* Left */}
           <div className="rounded-2xl border p-4 space-y-4">
             <div>
               <label className="text-sm opacity-70">Account</label>
@@ -443,6 +410,19 @@ export default function JournalPage() {
                 placeholder="YYYY-MM"
               />
               <div className="mt-1 text-xs opacity-60">Format: YYYY-MM</div>
+            </div>
+
+            <div>
+              <label className="text-sm opacity-70">ATX source (for day micro-summary)</label>
+              <select
+                className="mt-1 w-full rounded-xl border p-3"
+                value={atxSource}
+                onChange={(e) => setAtxSource(e.target.value as any)}
+                disabled={loadingCalendar || loadingDay}
+              >
+                <option value="mock">mock</option>
+                <option value="live">live</option>
+              </select>
             </div>
 
             <div className="rounded-xl border p-3">
@@ -489,7 +469,7 @@ export default function JournalPage() {
             )}
           </div>
 
-          {/* Right: calendar + day */}
+          {/* Right */}
           <div className="rounded-2xl border p-4 lg:col-span-2">
             <div className="grid grid-cols-2 gap-3 sm:grid-cols-3 lg:grid-cols-4">
               {Array.from({ length: totalDays }).map((_, i) => {
@@ -515,10 +495,9 @@ export default function JournalPage() {
               })}
             </div>
 
-            {/* Day panel */}
             {selectedDate && (
-              <div className="mt-4 rounded-2xl border p-4">
-                <div className="mb-3 flex items-baseline justify-between">
+              <div className="mt-4 rounded-2xl border p-4 space-y-4">
+                <div className="flex items-baseline justify-between">
                   <div className="font-semibold">{selectedDate}</div>
                   <div className="text-sm opacity-70">
                     {day?.entryCount ?? 0} entries • {tradesDay?.tradeCount ?? 0} trades
@@ -527,71 +506,52 @@ export default function JournalPage() {
 
                 {/* ATX micro-summary */}
                 <div className="rounded-xl border p-3">
-                  <div className="flex items-center justify-between gap-3">
-                    <div className="text-sm font-semibold">ATX (Day)</div>
-                    <div className="text-xs opacity-60">
-                      {atxDay?.atx ? `Score ${atxDay.atx.score}` : 'No ATX for this day'}
-                    </div>
+                  <div className="flex items-center justify-between">
+                    <div className="text-sm font-semibold">ATX for this day</div>
+                    <div className="text-xs opacity-60">{atxSource}</div>
                   </div>
 
-                  {!atxDay ? (
-                    <div className="mt-2 text-sm opacity-70">ATX not loaded yet.</div>
-                  ) : !atxDay.atx ? (
-                    <div className="mt-2 text-sm opacity-70">
-                      No trades for this day (or filters removed them), so no ATX is computed.
-                    </div>
-                  ) : (
-                    <>
-                      <div className="mt-3 grid grid-cols-1 sm:grid-cols-2 gap-2 text-sm">
-                        <div className="rounded-xl border p-2">Discipline: {atxDay.atx.subscores.discipline}</div>
-                        <div className="rounded-xl border p-2">Risk Integrity: {atxDay.atx.subscores.riskIntegrity}</div>
-                        <div className="rounded-xl border p-2">
-                          Execution Stability: {atxDay.atx.subscores.executionStability}
-                        </div>
-                        <div className="rounded-xl border p-2">
-                          Behavioural Volatility: {atxDay.atx.subscores.behaviouralVolatility}
-                        </div>
-                        <div className="rounded-xl border p-2">Consistency: {atxDay.atx.subscores.consistency}</div>
+                  {atxDay ? (
+                    <div className="mt-2">
+                      <div className="flex items-baseline justify-between">
+                        <div className="text-xl font-semibold">{atxDay.atx.score}</div>
+                        <div className="text-xs opacity-60">{atxDay.tradeCount} trades</div>
+                      </div>
+
+                      <div className="mt-2 grid grid-cols-2 gap-2 text-xs opacity-80">
+                        <div>D: {atxDay.atx.subscores.discipline}</div>
+                        <div>R: {atxDay.atx.subscores.riskIntegrity}</div>
+                        <div>E: {atxDay.atx.subscores.executionStability}</div>
+                        <div>V: {atxDay.atx.subscores.behaviouralVolatility}</div>
+                        <div>C: {atxDay.atx.subscores.consistency}</div>
                       </div>
 
                       {atxDay.atx.flags?.length ? (
-                        <div className="mt-3">
-                          <div className="text-xs opacity-60 mb-1">Flags</div>
-                          <div className="flex flex-wrap gap-2">
-                            {atxDay.atx.flags.map((f) => (
-                              <span key={f} className="px-2 py-1 rounded-xl border text-xs">
-                                {f}
-                              </span>
-                            ))}
-                          </div>
+                        <div className="mt-2 flex flex-wrap gap-2">
+                          {atxDay.atx.flags.map((f) => (
+                            <span key={f} className="px-2 py-1 rounded-md border text-[11px]">
+                              {f}
+                            </span>
+                          ))}
                         </div>
-                      ) : null}
-
-                      {atxDay.commentary ? (
-                        <div className="mt-3 rounded-xl border p-3">
-                          <div className="text-sm font-semibold">Micro commentary</div>
-                          <div className="mt-1 text-sm opacity-80">{atxDay.commentary.summary}</div>
-                          {safeBullets(atxDay.commentary).length ? (
-                            <ul className="mt-2 list-disc pl-5 text-sm opacity-80 space-y-1">
-                              {safeBullets(atxDay.commentary).map((b, i) => (
-                                <li key={i}>{b}</li>
-                              ))}
-                            </ul>
-                          ) : null}
-                        </div>
-                      ) : null}
-                    </>
+                      ) : (
+                        <div className="mt-2 text-xs opacity-60">No flags.</div>
+                      )}
+                    </div>
+                  ) : (
+                    <div className="mt-2 text-sm opacity-70">
+                      ATX day summary not loaded (or endpoint missing).
+                    </div>
                   )}
                 </div>
 
                 {/* Trades */}
-                <div className="mt-4 rounded-xl border p-3">
+                <div className="rounded-xl border p-3">
                   <div className="flex items-center justify-between gap-3">
                     <div className="text-sm font-semibold">Trades</div>
                     <div className="text-xs opacity-60">{tradesDay ? `${tradesDay.tradeCount} total` : '—'}</div>
                   </div>
 
-                  {/* Source filters */}
                   {availableSources.length > 0 && (
                     <div className="mt-3 flex flex-wrap gap-2">
                       {availableSources.map((s) => {
@@ -605,19 +565,25 @@ export default function JournalPage() {
                             ].join(' ')}
                             onClick={() => toggleSource(s)}
                             disabled={loadingDay}
-                            title="Toggle source filter"
                           >
                             {s}
                           </button>
                         );
                       })}
-
                       {selectedSources.length > 0 && (
                         <button
                           className="px-3 py-1.5 rounded-xl border text-xs"
-                          onClick={clearFilters}
+                          onClick={async () => {
+                            if (!accountId || !selectedDate) return;
+                            setSelectedSources([]);
+                            setLoadingDay(true);
+                            try {
+                              await loadTradesForDay(accountId, selectedDate);
+                            } finally {
+                              setLoadingDay(false);
+                            }
+                          }}
                           disabled={loadingDay}
-                          title="Clear filters"
                         >
                           Clear
                         </button>
@@ -647,7 +613,7 @@ export default function JournalPage() {
                     ))}
 
                     {tradesDay && tradesDay.trades.length > 50 && (
-                      <div className="text-xs opacity-60">Showing first 50 trades for readability.</div>
+                      <div className="text-xs opacity-60">Showing first 50 trades.</div>
                     )}
 
                     {tradesDay && tradesDay.trades.length === 0 && (
@@ -658,8 +624,8 @@ export default function JournalPage() {
                   </div>
                 </div>
 
-                {/* Entries */}
-                <div className="mt-4 rounded-xl border p-3">
+                {/* Notes */}
+                <div className="rounded-xl border p-3">
                   <div className="mb-2 flex items-baseline justify-between">
                     <div className="text-sm font-semibold">Notes & entries</div>
                     <div className="text-xs opacity-60">{day?.entryCount ?? 0} total</div>
@@ -723,25 +689,6 @@ export default function JournalPage() {
                               </div>
                             </>
                           )}
-
-                          {e.systemNotes?.length ? (
-                            <ul className="mt-3 list-disc pl-5 text-sm opacity-70 space-y-1">
-                              {e.systemNotes.map((n, idx) => (
-                                <li key={idx}>{n}</li>
-                              ))}
-                            </ul>
-                          ) : null}
-
-                          {e.aiReflectionQuestions?.length ? (
-                            <div className="mt-3">
-                              <div className="text-sm font-semibold">Reflection</div>
-                              <ul className="mt-2 list-disc pl-5 text-sm opacity-70 space-y-1">
-                                {e.aiReflectionQuestions.map((q, idx) => (
-                                  <li key={idx}>{q}</li>
-                                ))}
-                              </ul>
-                            </div>
-                          ) : null}
                         </div>
                       );
                     })}

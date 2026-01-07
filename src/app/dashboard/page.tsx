@@ -15,34 +15,39 @@ type Account = {
 type AccountsResponse = { accounts: Account[] };
 type CreateAccountResponse = { account: Account };
 
+type ATXSnapshot = {
+  score: number;
+  subscores: {
+    discipline: number;
+    riskIntegrity: number;
+    executionStability: number;
+    behaviouralVolatility: number;
+    consistency: number;
+  };
+  profiles?: string[];
+  flags: string[];
+};
+
 type ATXResponse = {
   accountId: number;
   tradeCount: number;
   epoch?: { epochId: number; startedAt: number };
-  atx: {
-    score: number;
-    subscores: {
-      discipline: number;
-      riskIntegrity: number;
-      executionStability: number;
-      behaviouralVolatility: number;
-      consistency: number;
-    };
-    profiles?: string[];
-    flags: string[];
-  };
+  atx: ATXSnapshot;
   commentary?: {
     summary: string;
-    bulletPoints: string[];
+    bulletPoints?: string[];
+    bullets?: string[]; // backend sometimes uses bullets
     reflectionQuestions?: string[];
   };
 };
 
 type TrendPoint = {
   startedAt: number;
-  score: number;
-  subscores?: ATXResponse['atx']['subscores'];
-  epochId?: number;
+  tradeCount?: number;
+  atx?: ATXSnapshot; // some backends return {atx}
+  score?: number; // some backends return flattened {score}
+  subscores?: ATXSnapshot['subscores'];
+  flags?: string[];
 };
 
 type EpochEvent = {
@@ -50,25 +55,33 @@ type EpochEvent = {
   startedAt: number;
   endedAt: number | null;
   triggerFlags: string[];
-  endedReason: string | null;
+  endedReason?: string | null;
+  startedATX?: ATXSnapshot | null;
+  endedATX?: ATXSnapshot | null;
   createdAt: number;
 };
 
 type TrendResponse = {
   accountId: number;
-  timeframe: 'epoch' | 'weekly' | 'monthly';
+  timeframe: string;
   points: TrendPoint[];
   epochs: EpochEvent[];
 };
 
-type EpochRect = {
-  key: string;
-  x: number;
-  w: number;
-  label: string;
-  endedAt: number | null;
-  reason: string | null;
-};
+const SELECTED_ACCOUNT_KEY = 'auric_selected_account_id';
+
+function getStoredAccountId(): number | null {
+  if (typeof window === 'undefined') return null;
+  const raw = window.localStorage.getItem(SELECTED_ACCOUNT_KEY);
+  const n = raw ? Number(raw) : NaN;
+  return Number.isFinite(n) && n > 0 ? n : null;
+}
+
+function setStoredAccountId(id: number) {
+  if (typeof window === 'undefined') return;
+  if (!id) return;
+  window.localStorage.setItem(SELECTED_ACCOUNT_KEY, String(id));
+}
 
 function toDisplayString(value: unknown): string {
   if (value == null) return '';
@@ -92,6 +105,63 @@ function toDisplayString(value: unknown): string {
   }
 }
 
+type MetricKey =
+  | 'score'
+  | 'discipline'
+  | 'riskIntegrity'
+  | 'executionStability'
+  | 'behaviouralVolatility'
+  | 'consistency';
+
+function metricLabel(k: MetricKey) {
+  switch (k) {
+    case 'score':
+      return 'ATX Score';
+    case 'discipline':
+      return 'Discipline';
+    case 'riskIntegrity':
+      return 'Risk Integrity';
+    case 'executionStability':
+      return 'Execution Stability';
+    case 'behaviouralVolatility':
+      return 'Behavioural Volatility';
+    case 'consistency':
+      return 'Consistency';
+  }
+}
+
+function fmtDate(ms: number) {
+  try {
+    return new Date(ms).toLocaleDateString();
+  } catch {
+    return String(ms);
+  }
+}
+
+function clamp(n: number, a: number, b: number) {
+  return Math.max(a, Math.min(b, n));
+}
+
+function getPointATX(p: TrendPoint): ATXSnapshot | null {
+  if (p.atx && typeof p.atx.score === 'number') return p.atx;
+  if (typeof p.score === 'number' && p.subscores) {
+    return {
+      score: p.score,
+      subscores: p.subscores,
+      flags: p.flags ?? [],
+      profiles: []
+    };
+  }
+  return null;
+}
+
+function getMetricValueFromPoint(p: TrendPoint, key: MetricKey): number | null {
+  const atx = getPointATX(p);
+  if (!atx) return null;
+  if (key === 'score') return atx.score;
+  return atx.subscores?.[key] ?? null;
+}
+
 export default function DashboardPage() {
   const router = useRouter();
 
@@ -102,13 +172,18 @@ export default function DashboardPage() {
   const [timeframe, setTimeframe] = useState<'epoch' | 'weekly' | 'monthly'>('epoch');
 
   const [data, setData] = useState<ATXResponse | null>(null);
+
   const [trend, setTrend] = useState<TrendResponse | null>(null);
+  const [metric, setMetric] = useState<MetricKey>('score');
 
   const [err, setErr] = useState<unknown>(null);
   const [debugPayload, setDebugPayload] = useState<unknown>(null);
 
   const [loading, setLoading] = useState(false);
   const [seedInfo, setSeedInfo] = useState<string | null>(null);
+
+  const [hoverIdx, setHoverIdx] = useState<number | null>(null);
+  const [hoverEpochId, setHoverEpochId] = useState<number | null>(null);
 
   const errText = useMemo(() => (err ? toDisplayString(err) : null), [err]);
 
@@ -126,7 +201,13 @@ export default function DashboardPage() {
     }
 
     setAccounts(accs);
-    if (!accountId && accs.length) setAccountId(accs[0].accountId);
+
+    const stored = getStoredAccountId();
+    const picked =
+      (stored && accs.find((a) => a.accountId === stored)?.accountId) || accs[0].accountId;
+
+    setAccountId(picked);
+    setStoredAccountId(picked);
   }
 
   useEffect(() => {
@@ -168,14 +249,15 @@ export default function DashboardPage() {
     if (!accountId) return;
 
     try {
-      // GET /atx/accounts/:accountId/trend?timeframe=weekly|monthly|epoch
+      // Expect backend Trend API to return { points, epochs }
       const res = await apiFetch<TrendResponse>(
-        `/atx/accounts/${accountId}/trend?timeframe=${timeframe}`,
+        `/atx/accounts/${accountId}/trend?timeframe=daily&limit=180&source=${source}`,
         { auth: true }
       );
       setTrend(res);
-    } catch (e: any) {
-      console.warn('Failed to load trend:', e?.message ?? e);
+    } catch (e) {
+      // Don't block the whole dashboard if trend fails
+      console.warn('Trend load failed:', e);
       setTrend(null);
     }
   }
@@ -214,63 +296,107 @@ export default function DashboardPage() {
   }, [accountId, source, timeframe]);
 
   const chart = useMemo(() => {
-    const pts = trend?.points ?? [];
-    const epochs = trend?.epochs ?? [];
+    const pts = (trend?.points ?? []).filter((p) => typeof p.startedAt === 'number');
+    if (pts.length < 2) return null;
 
-    const width = 760;
-    const height = 220;
-    const pad = 24;
+    const xsW = 900;
+    const ysH = 260;
+    const pad = 28;
 
-    if (pts.length < 2) {
-      return { width, height, svg: null as null | { poly: string; epochRects: EpochRect[]; min: number; max: number } };
-    }
+    const minTs = pts[0].startedAt;
+    const maxTs = pts[pts.length - 1].startedAt;
+    const spanTs = Math.max(1, maxTs - minTs);
 
-    const scores = pts.map((p) => p.score);
-    const min = Math.min(...scores);
-    const max = Math.max(...scores);
-    const range = Math.max(1, max - min);
+    const values: Array<number | null> = pts.map((p) => getMetricValueFromPoint(p, metric));
+    const cleanVals = values.filter((v): v is number => typeof v === 'number' && Number.isFinite(v));
 
-    const xForIndex = (i: number) =>
-      pad + (i / Math.max(1, pts.length - 1)) * (width - pad * 2);
+    if (!cleanVals.length) return null;
 
-    const yForScore = (s: number) =>
-      pad + ((max - s) / range) * (height - pad * 2);
+    const minV = Math.min(...cleanVals);
+    const maxV = Math.max(...cleanVals);
+    const spanV = Math.max(1, maxV - minV);
 
-    const xs = pts.map((_p, i) => xForIndex(i));
-    const poly = pts.map((p, i) => `${xs[i]},${yForScore(p.score)}`).join(' ');
+    const xForTs = (ts: number) => pad + ((ts - minTs) / spanTs) * (xsW - pad * 2);
+    const yForV = (v: number) => pad + (1 - (v - minV) / spanV) * (ysH - pad * 2);
 
-    const epochRects: EpochRect[] = epochs.map((e) => {
-      const startIdx = pts.findIndex((p) => p.startedAt >= e.startedAt);
-      const endedAt = e.endedAt;
-      const endIdx = endedAt == null ? -1 : pts.findIndex((p) => p.startedAt >= endedAt);
-
-      const startX = startIdx >= 0 ? xs[startIdx] : xs[0];
-      const endX = endIdx >= 0 ? xs[endIdx] : xs[xs.length - 1];
-
-      const x = Math.min(startX, endX);
-      const w = Math.max(2, Math.abs(endX - startX));
-
-      return {
-        key: `epoch-${e.epochId}`,
-        x,
-        w,
-        label: `Epoch ${e.epochId}`,
-        endedAt,
-        reason: e.endedReason
-      };
+    const ptsXY = pts.map((p, i) => {
+      const v = values[i];
+      const ts = p.startedAt;
+      const x = xForTs(ts);
+      const y = typeof v === 'number' ? yForV(v) : null;
+      return { x, y, ts, v, p };
     });
 
-    return {
-      width,
-      height,
-      svg: { poly, epochRects, min, max }
-    };
-  }, [trend]);
+    // Build path (skip nulls)
+    let d = '';
+    for (const item of ptsXY) {
+      if (item.y == null) continue;
+      if (!d) d = `M ${item.x.toFixed(2)} ${item.y.toFixed(2)}`;
+      else d += ` L ${item.x.toFixed(2)} ${item.y.toFixed(2)}`;
+    }
+
+    const epochs = trend?.epochs ?? [];
+    const epochRects = epochs
+      .map((e) => {
+        const x0 = xForTs(clamp(e.startedAt, minTs, maxTs));
+        const endTs = e.endedAt == null ? maxTs : clamp(e.endedAt, minTs, maxTs);
+        const x1 = xForTs(endTs);
+        const width = Math.max(0, x1 - x0);
+        return {
+          key: `epoch-${e.epochId}`,
+          epoch: e,
+          x: x0,
+          w: width
+        };
+      })
+      .filter((r) => r.w > 0);
+
+    const epochLines = epochs.map((e) => ({
+      key: `epoch-line-${e.epochId}`,
+      epoch: e,
+      x: xForTs(clamp(e.startedAt, minTs, maxTs))
+    }));
+
+    return { svg: { w: xsW, h: ysH, pad }, ptsXY, d, minV, maxV, epochRects, epochLines };
+  }, [trend, metric]);
+
+  const hoverPoint = useMemo(() => {
+    if (!chart || hoverIdx == null) return null;
+    const item = chart.ptsXY[hoverIdx];
+    if (!item) return null;
+    return item;
+  }, [chart, hoverIdx]);
+
+  const hoverEpoch = useMemo(() => {
+    if (!trend || hoverEpochId == null) return null;
+    return (trend.epochs ?? []).find((e) => e.epochId === hoverEpochId) ?? null;
+  }, [trend, hoverEpochId]);
+
+  function onChartMove(ev: React.MouseEvent<SVGSVGElement>) {
+    if (!chart) return;
+    const rect = (ev.currentTarget as any).getBoundingClientRect?.();
+    if (!rect) return;
+
+    const relX = ev.clientX - rect.left;
+    const viewX = (relX / rect.width) * chart.svg.w;
+
+    let bestIdx = 0;
+    let bestDist = Infinity;
+
+    for (let i = 0; i < chart.ptsXY.length; i++) {
+      const dx = Math.abs(chart.ptsXY[i].x - viewX);
+      if (dx < bestDist) {
+        bestDist = dx;
+        bestIdx = i;
+      }
+    }
+    setHoverIdx(bestIdx);
+  }
 
   return (
     <Protected>
       <div className="min-h-screen p-6">
-        <div className="max-w-4xl mx-auto space-y-6">
+        <div className="max-w-5xl mx-auto space-y-6">
           <header className="flex items-center justify-between">
             <div>
               <h1 className="text-2xl font-semibold">Dashboard</h1>
@@ -296,7 +422,11 @@ export default function DashboardPage() {
               <select
                 className="w-full border rounded-md p-2"
                 value={accountId || ''}
-                onChange={(e) => setAccountId(Number(e.target.value))}
+                onChange={(e) => {
+                  const id = Number(e.target.value);
+                  setAccountId(id);
+                  setStoredAccountId(id);
+                }}
               >
                 <option value="" disabled>
                   Select…
@@ -351,14 +481,188 @@ export default function DashboardPage() {
               className="px-4 py-2 rounded-md border"
               onClick={seedMockTrades}
               disabled={loading || !accountId}
-              title="Seeds mock trades, then refreshes ATX"
+              title="Seeds mock trades then refreshes ATX + trend"
             >
               Seed mock trades
             </button>
 
-            <button className="px-4 py-2 rounded-md border" onClick={() => router.push('/journal')}>
+            <button
+              className="px-4 py-2 rounded-md border"
+              onClick={() => router.push('/journal')}
+            >
               Journal
             </button>
+          </div>
+
+          {/* Trend chart */}
+          <div className="p-4 rounded-md border space-y-3">
+            <div className="flex flex-wrap items-center justify-between gap-2">
+              <div>
+                <div className="font-semibold">Trend</div>
+                <div className="text-xs opacity-60">
+                  {trend?.points?.length ? `${trend.points.length} points` : 'No trend data yet'}
+                </div>
+              </div>
+
+              <div className="flex flex-wrap gap-2">
+                {(
+                  [
+                    'score',
+                    'discipline',
+                    'riskIntegrity',
+                    'executionStability',
+                    'behaviouralVolatility',
+                    'consistency'
+                  ] as MetricKey[]
+                ).map((k) => (
+                  <button
+                    key={k}
+                    className={[
+                      'px-3 py-1.5 rounded-md border text-xs',
+                      metric === k ? 'bg-black text-white border-black' : 'border-black/20'
+                    ].join(' ')}
+                    onClick={() => setMetric(k)}
+                    disabled={!trend?.points?.length}
+                    title={`Show ${metricLabel(k)}`}
+                  >
+                    {k === 'score' ? 'ATX' : metricLabel(k)}
+                  </button>
+                ))}
+              </div>
+            </div>
+
+            {chart ? (
+              <div className="relative">
+                <svg
+                  viewBox={`0 0 ${chart.svg.w} ${chart.svg.h}`}
+                  className="w-full h-[260px] select-none"
+                  onMouseMove={onChartMove}
+                  onMouseLeave={() => {
+                    setHoverIdx(null);
+                    setHoverEpochId(null);
+                  }}
+                >
+                  {/* Epoch shaded regions */}
+                  {chart.svg && chart.epochRects.map((r: { key: string; x: number; w: number; epoch: EpochEvent }) => (
+                    <g key={r.key}>
+                      <rect
+                        x={r.x}
+                        y={chart.svg.pad}
+                        width={r.w}
+                        height={chart.svg.h - chart.svg.pad * 2}
+                        opacity={0.06}
+                        onMouseEnter={() => setHoverEpochId(r.epoch.epochId)}
+                        onMouseLeave={() => setHoverEpochId(null)}
+                      >
+                        <title>
+                          {`Epoch ${r.epoch.epochId}\nStarted: ${fmtDate(r.epoch.startedAt)}\nEnded: ${
+                            r.epoch.endedAt ? fmtDate(r.epoch.endedAt) : '—'
+                          }\nReason: ${r.epoch.endedReason ?? '—'}\nFlags: ${(r.epoch.triggerFlags ?? []).join(', ') || '—'}`}
+                        </title>
+                      </rect>
+                    </g>
+                  ))}
+
+                  {/* Trend line */}
+                  <path d={chart.d} fill="none" strokeWidth="2" />
+
+                  {/* Epoch start lines + labels */}
+                  {chart.epochLines.map((l: { key: string; x: number; epoch: EpochEvent }) => (
+                    <g key={l.key}>
+                      <line
+                        x1={l.x}
+                        y1={chart.svg.pad}
+                        x2={l.x}
+                        y2={chart.svg.h - chart.svg.pad}
+                        strokeWidth="1"
+                        opacity={0.35}
+                        onMouseEnter={() => setHoverEpochId(l.epoch.epochId)}
+                        onMouseLeave={() => setHoverEpochId(null)}
+                      >
+                        <title>
+                          {`Epoch ${l.epoch.epochId}\nStarted: ${fmtDate(l.epoch.startedAt)}\nReason: ${
+                            l.epoch.endedReason ?? '—'
+                          }\nFlags: ${(l.epoch.triggerFlags ?? []).join(', ') || '—'}`}
+                        </title>
+                      </line>
+                      <text x={l.x + 4} y={chart.svg.pad + 12} fontSize="10" opacity={0.7}>
+                        {`E${l.epoch.epochId}`}
+                      </text>
+                    </g>
+                  ))}
+
+                  {/* Points */}
+                  {chart.ptsXY.map((p, i) =>
+                    p.y == null ? null : (
+                      <circle
+                        key={i}
+                        cx={p.x}
+                        cy={p.y}
+                        r={i === hoverIdx ? 4 : 2.5}
+                        opacity={i === hoverIdx ? 0.95 : 0.55}
+                      >
+                        <title>{`${fmtDate(p.ts)} • ${metricLabel(metric)}: ${
+                          typeof p.v === 'number' ? p.v : '—'
+                        }`}</title>
+                      </circle>
+                    )
+                  )}
+                </svg>
+
+                {/* Hover tooltip */}
+                {(hoverPoint || hoverEpoch) && (
+                  <div className="absolute right-3 top-3 rounded-md border bg-white p-3 text-xs shadow-sm max-w-[320px]">
+                    {hoverPoint && (
+                      <div className="space-y-1">
+                        <div className="font-semibold">{fmtDate(hoverPoint.ts)}</div>
+                        <div>
+                          <span className="opacity-70">{metricLabel(metric)}:</span>{' '}
+                          <span className="font-semibold">
+                            {typeof hoverPoint.v === 'number' ? Math.round(hoverPoint.v) : '—'}
+                          </span>
+                        </div>
+                        {(() => {
+                          const atx = getPointATX(hoverPoint.p);
+                          if (!atx) return null;
+                          return (
+                            <div className="pt-1 space-y-0.5 opacity-80">
+                              <div>ATX: {atx.score}</div>
+                              <div className="grid grid-cols-2 gap-x-2 gap-y-0.5">
+                                <div>D: {atx.subscores.discipline}</div>
+                                <div>R: {atx.subscores.riskIntegrity}</div>
+                                <div>E: {atx.subscores.executionStability}</div>
+                                <div>V: {atx.subscores.behaviouralVolatility}</div>
+                                <div>C: {atx.subscores.consistency}</div>
+                              </div>
+                            </div>
+                          );
+                        })()}
+                      </div>
+                    )}
+
+                    {hoverEpoch && (
+                      <div className="mt-2 pt-2 border-t space-y-1">
+                        <div className="font-semibold">{`Epoch ${hoverEpoch.epochId}`}</div>
+                        <div className="opacity-80">
+                          {fmtDate(hoverEpoch.startedAt)} →{' '}
+                          {hoverEpoch.endedAt ? fmtDate(hoverEpoch.endedAt) : 'open'}
+                        </div>
+                        <div className="opacity-80">
+                          Reason: {hoverEpoch.endedReason ?? '—'}
+                        </div>
+                        <div className="opacity-80">
+                          Flags: {(hoverEpoch.triggerFlags ?? []).join(', ') || '—'}
+                        </div>
+                      </div>
+                    )}
+                  </div>
+                )}
+              </div>
+            ) : (
+              <div className="text-sm opacity-70">
+                Trend not available yet (seed trades + refresh).
+              </div>
+            )}
           </div>
 
           {seedInfo && !errText && (
@@ -381,57 +685,7 @@ export default function DashboardPage() {
             </div>
           )}
 
-          {/* Trend chart */}
-          <div className="p-4 rounded-md border">
-            <div className="flex items-baseline justify-between">
-              <div>
-                <div className="text-sm font-semibold">ATX Trend</div>
-                <div className="text-xs opacity-60">
-                  {trend?.points?.length ? `${trend.points.length} points` : 'No points yet'}
-                </div>
-              </div>
-              <div className="text-xs opacity-60">Epochs shown as shaded regions</div>
-            </div>
-
-            <div className="mt-3 overflow-x-auto">
-              {chart.svg ? (
-                <svg
-                  width={chart.width}
-                  height={chart.height}
-                  viewBox={`0 0 ${chart.width} ${chart.height}`}
-                  className="block"
-                >
-                  {/* Epoch shaded regions */}
-                  {chart.svg.epochRects.map((r: EpochRect) => (
-                    <g key={r.key}>
-                      <rect x={r.x} y={0} width={r.w} height={chart.height} opacity={0.08} />
-                      <line x1={r.x} y1={0} x2={r.x} y2={chart.height} opacity={0.25} strokeWidth={1} />
-                    </g>
-                  ))}
-
-                  {/* Trend */}
-                  <polyline
-                    fill="none"
-                    stroke="currentColor"
-                    strokeWidth={2}
-                    points={chart.svg.poly}
-                    opacity={0.9}
-                  />
-
-                  <text x={8} y={16} fontSize={11} opacity={0.6}>
-                    max: {chart.svg.max}
-                  </text>
-                  <text x={8} y={chart.height - 8} fontSize={11} opacity={0.6}>
-                    min: {chart.svg.min}
-                  </text>
-                </svg>
-              ) : (
-                <div className="text-sm opacity-70">
-                  Not enough trend data yet. Seed trades and refresh a few times (or wait for weekly/monthly points).
-                </div>
-              )}
-            </div>
-          </div>
+          {!errText && !data && loading && <div className="p-3 rounded-md border">Loading…</div>}
 
           {data && (
             <div className="space-y-4">
@@ -444,12 +698,8 @@ export default function DashboardPage() {
                 <div className="mt-3 grid grid-cols-1 md:grid-cols-2 gap-2 text-sm">
                   <div className="p-3 rounded-md bg-black/5">Discipline: {data.atx.subscores.discipline}</div>
                   <div className="p-3 rounded-md bg-black/5">Risk Integrity: {data.atx.subscores.riskIntegrity}</div>
-                  <div className="p-3 rounded-md bg-black/5">
-                    Execution Stability: {data.atx.subscores.executionStability}
-                  </div>
-                  <div className="p-3 rounded-md bg-black/5">
-                    Behavioural Volatility: {data.atx.subscores.behaviouralVolatility}
-                  </div>
+                  <div className="p-3 rounded-md bg-black/5">Execution Stability: {data.atx.subscores.executionStability}</div>
+                  <div className="p-3 rounded-md bg-black/5">Behavioural Volatility: {data.atx.subscores.behaviouralVolatility}</div>
                   <div className="p-3 rounded-md bg-black/5">Consistency: {data.atx.subscores.consistency}</div>
                 </div>
 
@@ -471,13 +721,17 @@ export default function DashboardPage() {
                 <div className="p-4 rounded-md border">
                   <h3 className="font-semibold">Commentary</h3>
                   <p className="mt-2 text-sm">{data.commentary.summary}</p>
-                  {data.commentary.bulletPoints?.length ? (
-                    <ul className="mt-2 text-sm list-disc pl-5 space-y-1">
-                      {data.commentary.bulletPoints.map((b, i) => (
-                        <li key={i}>{b}</li>
-                      ))}
-                    </ul>
-                  ) : null}
+
+                  {(() => {
+                    const bullets = data.commentary?.bulletPoints ?? data.commentary?.bullets ?? [];
+                    return bullets.length ? (
+                      <ul className="mt-2 text-sm list-disc pl-5 space-y-1">
+                        {bullets.map((b, i) => (
+                          <li key={i}>{b}</li>
+                        ))}
+                      </ul>
+                    ) : null;
+                  })()}
                 </div>
               )}
             </div>
