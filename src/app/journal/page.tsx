@@ -14,19 +14,10 @@ type Account = {
 type AccountsResponse = { accounts: Account[] };
 type CreateAccountResponse = { account: Account };
 
-type CalendarDayDTO = {
-  date: string;
-  hasEntry: boolean;
-  types: string[];
-  hasTrades?: boolean;
-  tradeCount?: number;
-  sources?: string[];
-};
-
 type CalendarResponse = {
   accountId: number;
   month: string;
-  days: CalendarDayDTO[];
+  days: Array<{ date: string; hasEntry: boolean; types: string[] }>;
 };
 
 type JournalEntryDTO = {
@@ -48,7 +39,7 @@ type DayResponse = {
 };
 
 type TradeDTO = {
-  source: string; // added by backend unified trades day endpoint
+  source: string; // unified trades endpoint
   tradeId: string;
   accountId: number;
   instrument?: string;
@@ -68,6 +59,30 @@ type TradesDayResponse = {
   sources: string[] | null;
   tradeCount: number;
   trades: TradeDTO[];
+};
+
+type ATXDayResponse = {
+  accountId: number;
+  date: string;
+  sources: string[];
+  tradeCount: number;
+  atx: null | {
+    score: number;
+    subscores: {
+      discipline: number;
+      riskIntegrity: number;
+      executionStability: number;
+      behaviouralVolatility: number;
+      consistency: number;
+    };
+    flags: string[];
+  };
+  commentary: null | {
+    summary: string;
+    bulletPoints?: string[];
+    bullets?: string[]; // backend might return either key
+    reflectionQuestions?: string[];
+  };
 };
 
 const SELECTED_ACCOUNT_KEY = 'auric_selected_account_id';
@@ -107,6 +122,13 @@ function fmtTime(ms: number) {
   }
 }
 
+function safeBullets(c: ATXDayResponse['commentary']): string[] {
+  if (!c) return [];
+  if (Array.isArray(c.bulletPoints)) return c.bulletPoints;
+  if (Array.isArray(c.bullets)) return c.bullets;
+  return [];
+}
+
 export default function JournalPage() {
   const router = useRouter();
 
@@ -120,6 +142,7 @@ export default function JournalPage() {
 
   const [day, setDay] = useState<DayResponse | null>(null);
   const [tradesDay, setTradesDay] = useState<TradesDayResponse | null>(null);
+  const [atxDay, setAtxDay] = useState<ATXDayResponse | null>(null);
 
   const [selectedSources, setSelectedSources] = useState<string[]>([]); // empty => all
 
@@ -183,6 +206,17 @@ export default function JournalPage() {
     setTradesDay(res);
   }
 
+  async function loadATXForDay(aid: number, date: string, sources?: string[]) {
+    const qs = new URLSearchParams();
+    qs.set('date', date);
+    if (sources && sources.length) qs.set('sources', sources.join(','));
+
+    const res = await apiFetch<ATXDayResponse>(`/atx/accounts/${aid}/day?${qs.toString()}`, {
+      auth: true
+    });
+    setAtxDay(res);
+  }
+
   useEffect(() => {
     ensureAccounts().catch((e: any) => setError(e?.message ?? 'Failed to load accounts'));
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -197,6 +231,7 @@ export default function JournalPage() {
 
     setDay(null);
     setTradesDay(null);
+    setAtxDay(null);
     setSelectedSources([]);
 
     setEditingId(null);
@@ -210,7 +245,7 @@ export default function JournalPage() {
       .finally(() => setLoadingCalendar(false));
   }, [accountId, month]);
 
-  // Load day + trades when selectedDate changes
+  // Load day + trades + day-ATX when selectedDate changes
   useEffect(() => {
     if (!accountId || !selectedDate) return;
 
@@ -219,23 +254,20 @@ export default function JournalPage() {
 
     setDay(null);
     setTradesDay(null);
+    setAtxDay(null);
     setSelectedSources([]); // default "all sources" when switching day
     setEditingId(null);
     setEditNotes('');
 
-    Promise.all([loadDay(accountId, selectedDate), loadTradesForDay(accountId, selectedDate)])
+    Promise.all([
+      loadDay(accountId, selectedDate),
+      loadTradesForDay(accountId, selectedDate),
+      loadATXForDay(accountId, selectedDate)
+    ])
       .catch((e: any) => setError(e?.message ?? 'Failed to load day'))
       .finally(() => setLoadingDay(false));
   }, [accountId, selectedDate]);
 
-  // Map date -> full day object (now includes trades fields)
-  const calendarByDate = useMemo(() => {
-    const map = new Map<string, CalendarDayDTO>();
-    (calendar?.days ?? []).forEach((d) => map.set(d.date, d));
-    return map;
-  }, [calendar]);
-
-  // Keep older markers (types) for any other logic
   const markers = useMemo(() => {
     const map = new Map<string, string[]>();
     (calendar?.days ?? []).forEach((d) => map.set(d.date, d.types));
@@ -266,10 +298,30 @@ export default function JournalPage() {
 
     setLoadingDay(true);
     setError(null);
+
     try {
-      await loadTradesForDay(accountId, selectedDate, next.length ? next : undefined);
+      const filter = next.length ? next : undefined;
+      await Promise.all([
+        loadTradesForDay(accountId, selectedDate, filter),
+        loadATXForDay(accountId, selectedDate, filter)
+      ]);
     } catch (e: any) {
-      setError(e?.message ?? 'Failed to load trades');
+      setError(e?.message ?? 'Failed to load trades/ATX');
+    } finally {
+      setLoadingDay(false);
+    }
+  }
+
+  async function clearFilters() {
+    if (!accountId || !selectedDate) return;
+    setSelectedSources([]);
+    setLoadingDay(true);
+    setError(null);
+    try {
+      await Promise.all([
+        loadTradesForDay(accountId, selectedDate),
+        loadATXForDay(accountId, selectedDate)
+      ]);
     } finally {
       setLoadingDay(false);
     }
@@ -278,7 +330,7 @@ export default function JournalPage() {
   async function createEntry() {
     if (!accountId || !selectedDate) return;
 
-    // Notes-only entry (title optional in UI, but backend expects it)
+    // Notes-only entry
     const title = newTitle.trim() || 'Notes';
     const notes = newNotes.trim();
 
@@ -443,14 +495,8 @@ export default function JournalPage() {
               {Array.from({ length: totalDays }).map((_, i) => {
                 const dayNum = i + 1;
                 const date = `${month}-${String(dayNum).padStart(2, '0')}`;
-
-                const calDay = calendarByDate.get(date);
                 const types = markers.get(date) ?? [];
-
-                const hasEntry = !!calDay?.hasEntry || types.length > 0;
-                const tradeCount = calDay?.tradeCount ?? 0;
-                const hasTrades = !!calDay?.hasTrades || tradeCount > 0;
-
+                const has = types.length > 0;
                 const active = selectedDate === date;
 
                 return (
@@ -463,23 +509,7 @@ export default function JournalPage() {
                     ].join(' ')}
                   >
                     <div className="text-sm font-semibold">{dayNum}</div>
-
-                    <div className="mt-1 text-[11px] opacity-60">
-                      {hasEntry ? (types.length ? types.join(', ') : 'entry') : '—'}
-                    </div>
-
-                    {hasTrades ? (
-                      <div className="mt-2 flex flex-col gap-1">
-                        <div className="inline-flex items-center gap-2 text-[11px]">
-                          <span className="px-2 py-0.5 rounded-md border">{tradeCount} trades</span>
-                        </div>
-                        {(calDay?.sources?.length ?? 0) > 0 ? (
-                          <div className="text-[10px] opacity-60 truncate">
-                            {(calDay?.sources ?? []).join(', ')}
-                          </div>
-                        ) : null}
-                      </div>
-                    ) : null}
+                    <div className="mt-1 text-[11px] opacity-60">{has ? types.join(', ') : '—'}</div>
                   </button>
                 );
               })}
@@ -495,8 +525,67 @@ export default function JournalPage() {
                   </div>
                 </div>
 
-                {/* Trades */}
+                {/* ATX micro-summary */}
                 <div className="rounded-xl border p-3">
+                  <div className="flex items-center justify-between gap-3">
+                    <div className="text-sm font-semibold">ATX (Day)</div>
+                    <div className="text-xs opacity-60">
+                      {atxDay?.atx ? `Score ${atxDay.atx.score}` : 'No ATX for this day'}
+                    </div>
+                  </div>
+
+                  {!atxDay ? (
+                    <div className="mt-2 text-sm opacity-70">ATX not loaded yet.</div>
+                  ) : !atxDay.atx ? (
+                    <div className="mt-2 text-sm opacity-70">
+                      No trades for this day (or filters removed them), so no ATX is computed.
+                    </div>
+                  ) : (
+                    <>
+                      <div className="mt-3 grid grid-cols-1 sm:grid-cols-2 gap-2 text-sm">
+                        <div className="rounded-xl border p-2">Discipline: {atxDay.atx.subscores.discipline}</div>
+                        <div className="rounded-xl border p-2">Risk Integrity: {atxDay.atx.subscores.riskIntegrity}</div>
+                        <div className="rounded-xl border p-2">
+                          Execution Stability: {atxDay.atx.subscores.executionStability}
+                        </div>
+                        <div className="rounded-xl border p-2">
+                          Behavioural Volatility: {atxDay.atx.subscores.behaviouralVolatility}
+                        </div>
+                        <div className="rounded-xl border p-2">Consistency: {atxDay.atx.subscores.consistency}</div>
+                      </div>
+
+                      {atxDay.atx.flags?.length ? (
+                        <div className="mt-3">
+                          <div className="text-xs opacity-60 mb-1">Flags</div>
+                          <div className="flex flex-wrap gap-2">
+                            {atxDay.atx.flags.map((f) => (
+                              <span key={f} className="px-2 py-1 rounded-xl border text-xs">
+                                {f}
+                              </span>
+                            ))}
+                          </div>
+                        </div>
+                      ) : null}
+
+                      {atxDay.commentary ? (
+                        <div className="mt-3 rounded-xl border p-3">
+                          <div className="text-sm font-semibold">Micro commentary</div>
+                          <div className="mt-1 text-sm opacity-80">{atxDay.commentary.summary}</div>
+                          {safeBullets(atxDay.commentary).length ? (
+                            <ul className="mt-2 list-disc pl-5 text-sm opacity-80 space-y-1">
+                              {safeBullets(atxDay.commentary).map((b, i) => (
+                                <li key={i}>{b}</li>
+                              ))}
+                            </ul>
+                          ) : null}
+                        </div>
+                      ) : null}
+                    </>
+                  )}
+                </div>
+
+                {/* Trades */}
+                <div className="mt-4 rounded-xl border p-3">
                   <div className="flex items-center justify-between gap-3">
                     <div className="text-sm font-semibold">Trades</div>
                     <div className="text-xs opacity-60">{tradesDay ? `${tradesDay.tradeCount} total` : '—'}</div>
@@ -522,19 +611,11 @@ export default function JournalPage() {
                           </button>
                         );
                       })}
+
                       {selectedSources.length > 0 && (
                         <button
                           className="px-3 py-1.5 rounded-xl border text-xs"
-                          onClick={async () => {
-                            if (!accountId || !selectedDate) return;
-                            setSelectedSources([]);
-                            setLoadingDay(true);
-                            try {
-                              await loadTradesForDay(accountId, selectedDate);
-                            } finally {
-                              setLoadingDay(false);
-                            }
-                          }}
+                          onClick={clearFilters}
                           disabled={loadingDay}
                           title="Clear filters"
                         >
