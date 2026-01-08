@@ -1,6 +1,6 @@
 'use client';
 
-import { useEffect, useMemo, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import Protected from '@/components/Protected';
 import { apiFetch } from '@/lib/api';
 import { useRouter } from 'next/navigation';
@@ -80,10 +80,15 @@ type ATXSnapshot = {
   profiles?: string[];
 };
 
+/**
+ * Backend day endpoint returns:
+ * { accountId, date, sources, tradeCount, atx }
+ * (it does NOT need "source=mock/live" anymore if using unified trades table)
+ */
 type ATXDayResponse = {
   accountId: number;
   date: string;
-  source: 'mock' | 'live';
+  sources: string[] | null;
   tradeCount: number;
   atx: ATXSnapshot;
 };
@@ -137,6 +142,10 @@ function fmtTime(ms: number) {
   }
 }
 
+function isValidMonth(m: string) {
+  return /^\d{4}-\d{2}$/.test(m);
+}
+
 export default function JournalPage() {
   const router = useRouter();
 
@@ -150,8 +159,6 @@ export default function JournalPage() {
 
   const [day, setDay] = useState<DayResponse | null>(null);
   const [tradesDay, setTradesDay] = useState<TradesDayResponse | null>(null);
-
-  const [atxSource, setAtxSource] = useState<'mock' | 'live'>('mock');
   const [atxDay, setAtxDay] = useState<ATXDayResponse | null>(null);
 
   const [selectedSources, setSelectedSources] = useState<string[]>([]); // empty => all
@@ -167,6 +174,13 @@ export default function JournalPage() {
   // Edit notes inline
   const [editingId, setEditingId] = useState<string | null>(null);
   const [editNotes, setEditNotes] = useState('');
+
+  /**
+   * ✅ REQUEST GUARDS
+   * Prevent stale responses from older requests overwriting state.
+   */
+  const calendarReqIdRef = useRef(0);
+  const dayReqIdRef = useRef(0);
 
   async function ensureAccounts() {
     const list = await apiFetch<AccountsResponse>('/accounts', { auth: true });
@@ -191,42 +205,36 @@ export default function JournalPage() {
     setStoredAccountId(picked);
   }
 
-  async function loadCalendar(aid: number, m: string) {
-    const res = await apiFetch<CalendarResponse>(`/journal/accounts/${aid}/calendar?month=${m}`, {
+  async function fetchCalendar(aid: number, m: string) {
+    return await apiFetch<CalendarResponse>(`/journal/accounts/${aid}/calendar?month=${m}`, {
       auth: true
     });
-    setCalendar(res);
   }
 
-  async function loadDay(aid: number, date: string) {
-    const res = await apiFetch<DayResponse>(`/journal/accounts/${aid}/day?date=${date}`, {
+  async function fetchDay(aid: number, date: string) {
+    return await apiFetch<DayResponse>(`/journal/accounts/${aid}/day?date=${date}`, {
       auth: true
     });
-    setDay(res);
   }
 
-  async function loadTradesForDay(aid: number, date: string, sources?: string[]) {
+  async function fetchTradesForDay(aid: number, date: string, sources?: string[]) {
     const qs = new URLSearchParams();
     qs.set('date', date);
     if (sources && sources.length) qs.set('sources', sources.join(','));
 
-    const res = await apiFetch<TradesDayResponse>(`/trades/accounts/${aid}/day?${qs.toString()}`, {
+    return await apiFetch<TradesDayResponse>(`/trades/accounts/${aid}/day?${qs.toString()}`, {
       auth: true
     });
-    setTradesDay(res);
   }
 
-  // ✅ UPDATED: sources passed through to ATX day endpoint
-  async function loadATXForDay(aid: number, date: string, src: 'mock' | 'live', sources?: string[]) {
+  async function fetchATXForDay(aid: number, date: string, sources?: string[]) {
     const qs = new URLSearchParams();
     qs.set('date', date);
-    qs.set('source', src);
     if (sources && sources.length) qs.set('sources', sources.join(','));
 
-    const res = await apiFetch<ATXDayResponse>(`/atx/accounts/${aid}/day?${qs.toString()}`, {
+    return await apiFetch<ATXDayResponse>(`/atx/accounts/${aid}/day?${qs.toString()}`, {
       auth: true
     });
-    setAtxDay(res);
   }
 
   useEffect(() => {
@@ -234,6 +242,10 @@ export default function JournalPage() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
+  /**
+   * ✅ Calendar load (guarded)
+   * Also: only fetch if month is valid "YYYY-MM" (prevents 400 spam).
+   */
   useEffect(() => {
     if (!accountId) return;
 
@@ -250,12 +262,36 @@ export default function JournalPage() {
     setNewTitle('');
     setNewNotes('');
 
+    // Don’t fetch if invalid month (type="month" prevents it, but extra safety)
+    if (!isValidMonth(month)) {
+      setCalendar(null);
+      return;
+    }
+
+    const reqId = ++calendarReqIdRef.current;
     setLoadingCalendar(true);
-    loadCalendar(accountId, month)
-      .catch((e: any) => setError(e?.message ?? 'Failed to load calendar'))
-      .finally(() => setLoadingCalendar(false));
+
+    fetchCalendar(accountId, month)
+      .then((res) => {
+        if (calendarReqIdRef.current !== reqId) return; // stale
+        setCalendar(res);
+      })
+      .catch((e: any) => {
+        if (calendarReqIdRef.current !== reqId) return; // stale
+        setError(e?.message ?? 'Failed to load calendar');
+        setCalendar(null);
+      })
+      .finally(() => {
+        if (calendarReqIdRef.current !== reqId) return; // stale
+        setLoadingCalendar(false);
+      });
   }, [accountId, month]);
 
+  /**
+   * ✅ Day load (guarded)
+   * Loads: journal day, trades day, ATX day — as a single guarded batch.
+   * This fixes: “trades show but ATX says NO_TRADES_FOR_DAY”
+   */
   useEffect(() => {
     if (!accountId || !selectedDate) return;
 
@@ -266,18 +302,33 @@ export default function JournalPage() {
     setTradesDay(null);
     setAtxDay(null);
 
-    setSelectedSources([]);
+    setSelectedSources([]); // reset to “all”
     setEditingId(null);
     setEditNotes('');
 
+    const reqId = ++dayReqIdRef.current;
+    const srcs = undefined; // all sources on initial day load
+
     Promise.all([
-      loadDay(accountId, selectedDate),
-      loadTradesForDay(accountId, selectedDate),
-      loadATXForDay(accountId, selectedDate, atxSource)
+      fetchDay(accountId, selectedDate),
+      fetchTradesForDay(accountId, selectedDate, srcs),
+      fetchATXForDay(accountId, selectedDate, srcs)
     ])
-      .catch((e: any) => setError(e?.message ?? 'Failed to load day'))
-      .finally(() => setLoadingDay(false));
-  }, [accountId, selectedDate, atxSource]);
+      .then(([dayRes, tradesRes, atxRes]) => {
+        if (dayReqIdRef.current !== reqId) return; // stale
+        setDay(dayRes);
+        setTradesDay(tradesRes);
+        setAtxDay(atxRes);
+      })
+      .catch((e: any) => {
+        if (dayReqIdRef.current !== reqId) return; // stale
+        setError(e?.message ?? 'Failed to load day');
+      })
+      .finally(() => {
+        if (dayReqIdRef.current !== reqId) return; // stale
+        setLoadingDay(false);
+      });
+  }, [accountId, selectedDate]);
 
   const markers = useMemo(() => {
     const map = new Map<string, string[]>();
@@ -287,7 +338,7 @@ export default function JournalPage() {
 
   const [yy, mm] = month.split('-').map(Number);
   const monthIndex = (mm ?? 1) - 1;
-  const totalDays = daysInMonth(yy, monthIndex);
+  const totalDays = Number.isFinite(yy) && Number.isFinite(monthIndex) ? daysInMonth(yy, monthIndex) : 30;
 
   const availableSources = useMemo(() => {
     const set = new Set<string>();
@@ -297,17 +348,30 @@ export default function JournalPage() {
 
   async function refreshDayViews(nextSources: string[]) {
     if (!accountId || !selectedDate) return;
+
+    const reqId = ++dayReqIdRef.current; // new “latest”
     setLoadingDay(true);
     setError(null);
+
     try {
       const srcs = nextSources.length ? nextSources : undefined;
-      await Promise.all([
-        loadTradesForDay(accountId, selectedDate, srcs),
-        loadATXForDay(accountId, selectedDate, atxSource, srcs)
+
+      const [tradesRes, atxRes, dayRes] = await Promise.all([
+        fetchTradesForDay(accountId, selectedDate, srcs),
+        fetchATXForDay(accountId, selectedDate, srcs),
+        fetchDay(accountId, selectedDate)
       ]);
+
+      if (dayReqIdRef.current !== reqId) return; // stale
+
+      setTradesDay(tradesRes);
+      setAtxDay(atxRes);
+      setDay(dayRes);
     } catch (e: any) {
+      if (dayReqIdRef.current !== reqId) return; // stale
       setError(e?.message ?? 'Failed to refresh day');
     } finally {
+      if (dayReqIdRef.current !== reqId) return; // stale
       setLoadingDay(false);
     }
   }
@@ -351,7 +415,23 @@ export default function JournalPage() {
       setNewTitle('');
       setNewNotes('');
 
-      await Promise.all([loadDay(accountId, selectedDate), loadCalendar(accountId, month)]);
+      // refresh day + calendar (calendar guarded)
+      const reqId = ++dayReqIdRef.current;
+      const [dayRes] = await Promise.all([fetchDay(accountId, selectedDate)]);
+      if (dayReqIdRef.current === reqId) setDay(dayRes);
+
+      // trigger calendar reload safely
+      const calReqId = ++calendarReqIdRef.current;
+      setLoadingCalendar(true);
+      fetchCalendar(accountId, month)
+        .then((cal) => {
+          if (calendarReqIdRef.current !== calReqId) return;
+          setCalendar(cal);
+        })
+        .finally(() => {
+          if (calendarReqIdRef.current !== calReqId) return;
+          setLoadingCalendar(false);
+        });
     } catch (e: any) {
       setError(e?.message ?? 'Failed to create notes');
     } finally {
@@ -386,7 +466,19 @@ export default function JournalPage() {
       setEditingId(null);
       setEditNotes('');
 
-      await Promise.all([loadDay(accountId, selectedDate), loadCalendar(accountId, month)]);
+      await Promise.all([refreshDayViews(selectedSources)]);
+      // calendar markers (still based on journal entries)
+      const calReqId = ++calendarReqIdRef.current;
+      setLoadingCalendar(true);
+      fetchCalendar(accountId, month)
+        .then((cal) => {
+          if (calendarReqIdRef.current !== calReqId) return;
+          setCalendar(cal);
+        })
+        .finally(() => {
+          if (calendarReqIdRef.current !== calReqId) return;
+          setLoadingCalendar(false);
+        });
     } catch (e: any) {
       setError(e?.message ?? 'Failed to update notes');
     } finally {
@@ -434,26 +526,14 @@ export default function JournalPage() {
 
             <div>
               <label className="text-sm opacity-70">Month</label>
+              {/* ✅ type="month" prevents invalid partial strings and kills 400 spam */}
               <input
+                type="month"
                 className="mt-1 w-full rounded-xl border p-3"
                 value={month}
                 onChange={(e) => setMonth(e.target.value)}
-                placeholder="YYYY-MM"
               />
-              <div className="mt-1 text-xs opacity-60">Format: YYYY-MM</div>
-            </div>
-
-            <div>
-              <label className="text-sm opacity-70">ATX source (for day micro-summary)</label>
-              <select
-                className="mt-1 w-full rounded-xl border p-3"
-                value={atxSource}
-                onChange={(e) => setAtxSource(e.target.value as any)}
-                disabled={loadingCalendar || loadingDay}
-              >
-                <option value="mock">mock</option>
-                <option value="live">live</option>
-              </select>
+              <div className="mt-1 text-xs opacity-60">Choose a month</div>
             </div>
 
             <div className="rounded-xl border p-3">
@@ -494,7 +574,9 @@ export default function JournalPage() {
             {(loadingCalendar || loadingDay) && <div className="text-sm opacity-70">Loading…</div>}
 
             {error && (
-              <div className="rounded-xl border border-red-300 bg-red-50 p-3 text-sm text-red-800">{error}</div>
+              <div className="rounded-xl border border-red-300 bg-red-50 p-3 text-sm text-red-800">
+                {error}
+              </div>
             )}
           </div>
 
@@ -532,13 +614,12 @@ export default function JournalPage() {
                   </div>
                 </div>
 
-                {/* ✅ ATX micro-summary (above trades) */}
+                {/* ATX micro-summary */}
                 <div className="rounded-xl border p-3">
                   <div className="flex items-center justify-between">
                     <div className="text-sm font-semibold">ATX for this day</div>
                     <div className="text-xs opacity-60">
-                      {atxSource}
-                      {selectedSources.length ? ` • ${selectedSources.join(', ')}` : ''}
+                      {selectedSources.length ? selectedSources.join(', ') : 'all sources'}
                     </div>
                   </div>
 
@@ -570,7 +651,7 @@ export default function JournalPage() {
                       )}
                     </div>
                   ) : (
-                    <div className="mt-2 text-sm opacity-70">ATX day summary not loaded (or endpoint missing).</div>
+                    <div className="mt-2 text-sm opacity-70">ATX day summary not loaded.</div>
                   )}
                 </div>
 
@@ -594,19 +675,13 @@ export default function JournalPage() {
                             ].join(' ')}
                             onClick={() => toggleSource(s)}
                             disabled={loadingDay}
-                            title="Toggle source filter"
                           >
                             {s}
                           </button>
                         );
                       })}
                       {selectedSources.length > 0 && (
-                        <button
-                          className="px-3 py-1.5 rounded-xl border text-xs"
-                          onClick={clearSourceFilters}
-                          disabled={loadingDay}
-                          title="Clear filters"
-                        >
+                        <button className="px-3 py-1.5 rounded-xl border text-xs" onClick={clearSourceFilters} disabled={loadingDay}>
                           Clear
                         </button>
                       )}
@@ -681,11 +756,7 @@ export default function JournalPage() {
                                 disabled={loadingDay}
                               />
                               <div className="mt-3 flex gap-2">
-                                <button
-                                  className="px-3 py-2 rounded-xl bg-black text-white text-sm"
-                                  onClick={() => saveEdit(e.id)}
-                                  disabled={loadingDay}
-                                >
+                                <button className="px-3 py-2 rounded-xl bg-black text-white text-sm" onClick={() => saveEdit(e.id)} disabled={loadingDay}>
                                   {loadingDay ? 'Saving…' : 'Save'}
                                 </button>
                                 <button
