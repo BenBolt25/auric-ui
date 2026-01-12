@@ -7,7 +7,6 @@ import { apiFetch } from '@/lib/api';
 import { clearToken } from '@/lib/auth';
 import { MaturityBadge, type ATXMaturity } from '../../components/MaturityBadge';
 import { Sparkline } from '../../components/Sparkline';
-import { getCTraderConnectUrl } from '@/lib/ctrader';
 
 type Account = {
   accountId: number;
@@ -440,6 +439,19 @@ export default function DashboardPage() {
       setCTraderErr(toDisplayString(e));
     }
   }
+  
+async function startCTraderOAuth() {
+  try {
+    const res = await apiFetch<{ url?: string; connectUrl?: string }>(`/ctrader/connect-url`, { auth: true });
+
+    const url = res.url ?? res.connectUrl;
+    if (!url) throw new Error(`Missing connect url in response: ${toDisplayString(res)}`);
+
+    window.location.assign(url);
+  } catch (e: any) {
+    setCTraderErr(toDisplayString(e));
+  }
+}
 
   async function syncLinked(linkedId: number) {
     if (!accountId || !linkedId) return;
@@ -1759,14 +1771,9 @@ export default function DashboardPage() {
                 <div className="mt-3 flex flex-col sm:flex-row gap-2 sm:items-center">
                   <button
                     className="px-3 py-2 rounded-xl border border-white/10 bg-white/5 text-sm hover:bg-white/10"
-                    onClick={async () => {
-                      try {
-                        const url = await getCTraderConnectUrl();
-                        window.location.assign(url);
-                      } catch (e: any) {
-                        setCTraderErr(toDisplayString(e));
-                      }
-                    }}
+                    onClick={() => {
+  void startCTraderOAuth();
+}}
                     title="Start cTrader OAuth"
                   >
                     Connect cTrader
