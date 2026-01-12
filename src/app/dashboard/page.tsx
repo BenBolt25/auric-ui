@@ -7,6 +7,7 @@ import { apiFetch } from '@/lib/api';
 import { clearToken } from '@/lib/auth';
 import { MaturityBadge, type ATXMaturity } from '../../components/MaturityBadge';
 import { Sparkline } from '../../components/Sparkline';
+import { getCTraderConnectUrl } from '@/lib/ctrader';
 
 type Account = {
   accountId: number;
@@ -115,7 +116,6 @@ type CalendarResponse = {
   days: CalendarDay[];
 };
 
-
 type LinkedAccount = {
   id: number;
   accountId: number;
@@ -188,14 +188,6 @@ function timeAgo(ms: number | null | undefined) {
   const d = Math.floor(h / 24);
   if (d < 14) return `${d}d ago`;
   return new Date(ms).toLocaleDateString();
-}
-
-function isoDay(ms: number) {
-  try {
-    return new Date(ms).toISOString().slice(0, 10);
-  } catch {
-    return '';
-  }
 }
 
 function yyyymmFromIsoDay(d: string) {
@@ -323,12 +315,9 @@ export default function DashboardPage() {
   const [accounts, setAccounts] = useState<Account[]>([]);
   const [accountId, setAccountId] = useState<number>(0);
 
-  // sources filter for overall ATX/trend call ("" = all)
   const [sourceKey, setSourceKey] = useState<string>('');
-
   const [timeframe, setTimeframe] = useState<'epoch' | 'weekly' | 'monthly'>('epoch');
 
-  // chart overlays
   const [showSources, setShowSources] = useState<boolean>(true);
   const [overlaySubs, setOverlaySubs] = useState<Record<MetricKey, boolean>>({
     score: false,
@@ -346,8 +335,6 @@ export default function DashboardPage() {
     Array<{ date: string; tradeCount: number; sources: string[]; hasEntry: boolean; types: string[] }>
   >([]);
 
-
-  // Linked accounts (multi-source observability)
   const [linkedAccounts, setLinkedAccounts] = useState<LinkedAccount[]>([]);
   const [linkedErr, setLinkedErr] = useState<string | null>(null);
   const [linkedLoading, setLinkedLoading] = useState<boolean>(false);
@@ -401,7 +388,6 @@ export default function DashboardPage() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
-
   async function loadLinkedAccounts() {
     if (!accountId) return;
     setLinkedLoading(true);
@@ -434,7 +420,6 @@ export default function DashboardPage() {
       setCTraderLoading(false);
     }
   }
-
 
   async function loadCTraderStatus() {
     try {
@@ -474,7 +459,6 @@ export default function DashboardPage() {
       setSyncingByLinkedId((m) => ({ ...m, [linkedId]: false }));
     }
   }
-
 
   async function renameLinked(linkedId: number, label: string) {
     if (!accountId || !linkedId) return;
@@ -552,7 +536,6 @@ export default function DashboardPage() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [accountId]);
 
-
   async function loadATX() {
     if (!accountId) return;
 
@@ -596,7 +579,6 @@ export default function DashboardPage() {
       const res = await apiFetch<TrendResponse>(`/atx/accounts/${accountId}/trend?${qs.toString()}`, { auth: true });
       setTrend(res);
 
-      // If the selected sourceKey is no longer present (e.g., after reseed), reset.
       if (sourceKey) {
         const keys = Object.keys(res.seriesBySource ?? {});
         if (keys.length && !keys.includes(sourceKey)) setSourceKey('');
@@ -644,7 +626,6 @@ export default function DashboardPage() {
       ingest(c0);
       ingest(c1);
 
-      // Build last 28 days from today (UTC day labels)
       const today = new Date();
       const out: Array<{ date: string; tradeCount: number; sources: string[]; hasEntry: boolean; types: string[] }> = [];
       for (let i = 27; i >= 0; i--) {
@@ -675,14 +656,11 @@ export default function DashboardPage() {
     setSeedInfo(null);
 
     try {
-      const res = await apiFetch<{ ok: boolean; accountId: number; inserted: number }>(
-        `/accounts/${accountId}/seed-mock-trades`,
-        {
-          method: 'POST',
-          auth: true,
-          body: { count: 300 }
-        }
-      );
+      const res = await apiFetch<{ ok: boolean; accountId: number; inserted: number }>(`/accounts/${accountId}/seed-mock-trades`, {
+        method: 'POST',
+        auth: true,
+        body: { count: 300 }
+      });
 
       setSeedInfo(`Seeded ${res.inserted} mock trades for account ${res.accountId}.`);
       await Promise.all([loadATX(), loadTrend(), loadHeatmap28()]);
@@ -704,7 +682,6 @@ export default function DashboardPage() {
   const availableSourceKeys = useMemo(() => {
     const keys = Object.keys(trend?.seriesBySource ?? {});
     if (keys.length) return keys.sort();
-    // fallback for early states
     return ['mock:default', 'live:default'];
   }, [trend]);
 
@@ -795,14 +772,12 @@ export default function DashboardPage() {
     const pts = (trend?.points ?? []).map((p) => getPointATX(p)).filter(Boolean) as ATXSnapshot[];
     if (!pts.length) return null;
 
-    // Evaluate last 14 daily observations
     const tail = pts.slice(-14);
 
     const disciplineGood = (x: ATXSnapshot) => x.subscores.discipline >= 60 && !x.flags.includes('DISCIPLINE_LOW');
     const riskGood = (x: ATXSnapshot) => x.subscores.riskIntegrity >= 60 && !x.flags.includes('RISK_INTEGRITY_LOW');
     const calmGood = (x: ATXSnapshot) => x.subscores.behaviouralVolatility <= 60 && !x.flags.includes('BEHAVIOURAL_VOLATILITY_HIGH');
 
-    // Streak: consecutive good discipline days from latest backwards
     let streak = 0;
     for (let i = pts.length - 1; i >= 0; i--) {
       if (disciplineGood(pts[i])) streak++;
@@ -812,9 +787,11 @@ export default function DashboardPage() {
     const riskRate = tail.length ? tail.filter(riskGood).length / tail.length : 0;
     const calmRate = tail.length ? tail.filter(calmGood).length / tail.length : 0;
 
-    // "Instability" days: any day with a core disruption flag
-    const instability = tail.filter((x) =>
-      x.flags.includes('DISCIPLINE_LOW') || x.flags.includes('RISK_INTEGRITY_LOW') || x.flags.includes('BEHAVIOURAL_VOLATILITY_HIGH')
+    const instability = tail.filter(
+      (x) =>
+        x.flags.includes('DISCIPLINE_LOW') ||
+        x.flags.includes('RISK_INTEGRITY_LOW') ||
+        x.flags.includes('BEHAVIOURAL_VOLATILITY_HIGH')
     ).length;
 
     return {
@@ -833,7 +810,6 @@ export default function DashboardPage() {
     const pts = trend?.points ?? [];
     const latest = pts.length ? getPointATX(pts[pts.length - 1]) : null;
 
-    // Estimate epoch start score from first point at/after epoch start
     const startPoint = pts.find((p) => (p.startedAt ?? 0) >= last.startedAt) ?? null;
     const startATX = startPoint ? getPointATX(startPoint) : null;
 
@@ -908,7 +884,12 @@ export default function DashboardPage() {
 
   const bestWorstSource = useMemo(() => {
     if (!sourcePanel.length) return null;
-    const scored = sourcePanel.filter((r) => typeof r.avg7d === 'number') as Array<{ source: string; avg7d: number; latestScore: number | null; trades7d: number }>;
+    const scored = sourcePanel.filter((r) => typeof r.avg7d === 'number') as Array<{
+      source: string;
+      avg7d: number;
+      latestScore: number | null;
+      trades7d: number;
+    }>;
     if (!scored.length) return null;
     const best = scored.slice().sort((a, b) => b.avg7d - a.avg7d)[0];
     const worst = scored.slice().sort((a, b) => a.avg7d - b.avg7d)[0];
@@ -927,7 +908,6 @@ export default function DashboardPage() {
     const maxTs = pts[pts.length - 1].startedAt;
     const spanTs = Math.max(1, maxTs - minTs);
 
-    // Fixed 0..100 scale (institutional: stable, avoids exaggerating noise)
     const xForTs = (ts: number) => pad + ((ts - minTs) / spanTs) * (xsW - pad * 2);
     const yForV = (v: number) => pad + (1 - clamp(v, 0, 100) / 100) * (ysH - pad * 2);
 
@@ -944,7 +924,6 @@ export default function DashboardPage() {
 
     const mainPath = buildPath(mainPts);
 
-    // Subscore overlays
     const overlayPaths: Array<{ key: MetricKey; d: string; dash: string; opacity: number }> = [];
     const dashByKey: Record<string, string> = {
       discipline: '5 4',
@@ -969,7 +948,6 @@ export default function DashboardPage() {
       }
     }
 
-    // Per-source lines
     const sourcePaths: Array<{ source: string; d: string; dash: string; opacity: number }> = [];
     if (showSources) {
       const series = trend?.seriesBySource ?? {};
@@ -1170,7 +1148,10 @@ export default function DashboardPage() {
               Seed mock trades
             </button>
 
-            <button className="px-4 py-2 rounded-xl border border-white/10 bg-white/5 hover:bg-white/10" onClick={() => router.push('/journal')}>
+            <button
+              className="px-4 py-2 rounded-xl border border-white/10 bg-white/5 hover:bg-white/10"
+              onClick={() => router.push('/journal')}
+            >
               Journal
             </button>
           </div>
@@ -1201,16 +1182,17 @@ export default function DashboardPage() {
                   <div className="text-xs opacity-60">Current ATX</div>
                   <div className="flex items-center gap-3">
                     <div className="text-2xl font-semibold">{data?.atx?.score ?? '—'}</div>
-                    <MaturityBadge maturity={data?.maturity ?? trend?.maturity} baselineLocked={data?.baselineLocked ?? trend?.baselineLocked} />
+                    <MaturityBadge
+                      maturity={data?.maturity ?? trend?.maturity}
+                      baselineLocked={data?.baselineLocked ?? trend?.baselineLocked}
+                    />
                   </div>
                   <div className="text-xs opacity-70 mt-1">
-                    {observationLine ? `Observed: ${observationLine}` : 'ATX updates daily and becomes more reliable as Auric observes behaviour across time and market conditions.'}
+                    {observationLine
+                      ? `Observed: ${observationLine}`
+                      : 'ATX updates daily and becomes more reliable as Auric observes behaviour across time and market conditions.'}
                   </div>
-                  {digestSummary ? (
-                    <div className="mt-2 text-sm text-white/80">
-                      {digestSummary}
-                    </div>
-                  ) : null}
+                  {digestSummary ? <div className="mt-2 text-sm text-white/80">{digestSummary}</div> : null}
                 </div>
 
                 <div className="text-sm opacity-70">
@@ -1303,7 +1285,9 @@ export default function DashboardPage() {
                   <div className="mt-1 text-sm">
                     Avg: <span className="font-semibold">{baselineCompare.baselineAvg}</span> • Current:{' '}
                     <span className="font-semibold">{baselineCompare.latest}</span> • Δ{' '}
-                    <span className="font-semibold">{baselineCompare.delta >= 0 ? `+${baselineCompare.delta}` : baselineCompare.delta}</span>
+                    <span className="font-semibold">
+                      {baselineCompare.delta >= 0 ? `+${baselineCompare.delta}` : baselineCompare.delta}
+                    </span>
                   </div>
                   <div className="mt-1 text-[11px] text-white/60">
                     Epoch {baselineCompare.epoch.epochId} • Locked{' '}
@@ -1393,7 +1377,6 @@ export default function DashboardPage() {
                     setHoverEpochId(null);
                   }}
                 >
-                  {/* Epoch shaded regions */}
                   {chart.epochRects.map((r) => (
                     <rect
                       key={`epoch-rect-${r.epoch.epochId}`}
@@ -1411,10 +1394,8 @@ export default function DashboardPage() {
                     </rect>
                   ))}
 
-                  {/* Main ATX line */}
                   <path d={chart.mainPath} fill="none" strokeWidth="2" />
 
-                  {/* Subscore overlays */}
                   {chart.overlayPaths.map((p) => (
                     <path
                       key={`overlay-${p.key}`}
@@ -1428,7 +1409,6 @@ export default function DashboardPage() {
                     </path>
                   ))}
 
-                  {/* Per-source lines */}
                   {chart.sourcePaths.map((p) => (
                     <path
                       key={`source-${p.source}`}
@@ -1442,9 +1422,8 @@ export default function DashboardPage() {
                     </path>
                   ))}
 
-                  {/* Epoch start lines */}
                   {chart.epochLines.map((l) => (
-                    <g key={`epoch-line-${l.epoch.epochId}`}> 
+                    <g key={`epoch-line-${l.epoch.epochId}`}>
                       <line
                         x1={l.x}
                         y1={chart.svg.pad}
@@ -1465,7 +1444,6 @@ export default function DashboardPage() {
                     </g>
                   ))}
 
-                  {/* Hover point marker */}
                   {chart.mainPts.map((p, i) => (
                     <circle
                       key={`pt-${i}`}
@@ -1479,7 +1457,6 @@ export default function DashboardPage() {
                   ))}
                 </svg>
 
-                {/* Hover tooltip */}
                 {(hoverPoint || hoverEpoch) && (
                   <div className="absolute right-3 top-3 rounded-2xl border border-white/10 bg-neutral-950/90 backdrop-blur-sm p-3 text-xs text-white/90 shadow-lg max-w-[360px]">
                     {hoverPoint && (
@@ -1488,6 +1465,7 @@ export default function DashboardPage() {
                         <div>
                           <span className="opacity-70">ATX:</span> <span className="font-semibold">{Math.round(hoverPoint.v)}</span>
                         </div>
+
                         {(() => {
                           const atx = getPointATX(hoverPoint.p);
                           if (!atx) return null;
@@ -1537,7 +1515,11 @@ export default function DashboardPage() {
                         <div className="opacity-80">
                           {fmtDate(hoverEpoch.startedAt)} → {hoverEpoch.endedAt ? fmtDate(hoverEpoch.endedAt) : 'open'}
                         </div>
-                        {hoverEpoch.provisional ? <div className="opacity-80">Status: provisional</div> : <div className="opacity-80">Status: confirmed</div>}
+                        {hoverEpoch.provisional ? (
+                          <div className="opacity-80">Status: provisional</div>
+                        ) : (
+                          <div className="opacity-80">Status: confirmed</div>
+                        )}
                         <div className="opacity-80">Reason: {hoverEpoch.endedReason ?? '—'}</div>
                         <div className="opacity-80">Flags: {(hoverEpoch.triggerFlags ?? []).join(', ') || '—'}</div>
                       </div>
@@ -1563,7 +1545,8 @@ export default function DashboardPage() {
               <div className="mt-3 grid grid-cols-1 md:grid-cols-2 gap-3">
                 {SUBSCORE_KEYS.map((k) => {
                   const vals = (trend?.points ?? []).map((p) => getMetricValueFromPoint(p, k));
-                  const last = typeof vals[vals.length - 1] === 'number' ? Math.round(vals[vals.length - 1] as number) : null;
+                  const last =
+                    typeof vals[vals.length - 1] === 'number' ? Math.round(vals[vals.length - 1] as number) : null;
                   return (
                     <div key={k} className="p-3 rounded-xl border border-white/10 bg-white/5">
                       <div className="flex items-center justify-between">
@@ -1612,16 +1595,13 @@ export default function DashboardPage() {
             </div>
           </div>
 
-
           {/* Linked accounts + AURIX readiness */}
           <div className="grid grid-cols-1 lg:grid-cols-3 gap-4">
             <div className="p-4 rounded-2xl border border-white/10 bg-white/5 backdrop-blur-sm lg:col-span-2">
               <div className="flex flex-wrap items-end justify-between gap-2">
                 <div>
                   <div className="font-semibold">Linked accounts</div>
-                  <div className="text-xs opacity-60">
-                    Attach multiple platforms / accounts under one Auric account. Trades ingest per sourceKey.
-                  </div>
+                  <div className="text-xs opacity-60">Attach multiple platforms / accounts under one Auric account. Trades ingest per sourceKey.</div>
                 </div>
                 <div className="flex items-center gap-2">
                   <button
@@ -1749,6 +1729,7 @@ export default function DashboardPage() {
                 <div className="text-xs opacity-70 mt-1">
                   If cTrader isn’t connected yet, connect first — then pick an account and sync closed trades.
                 </div>
+
                 <div className="mt-2 flex flex-wrap items-center gap-2 text-xs">
                   <span className="inline-flex items-center gap-2 rounded-full border border-white/10 bg-white/5 px-3 py-1">
                     <span className={ctraderStatus?.connected ? 'text-emerald-200' : 'text-white/70'}>
@@ -1761,6 +1742,7 @@ export default function DashboardPage() {
                       </>
                     ) : null}
                   </span>
+
                   {ctraderStatus?.connected ? (
                     <button
                       className="px-3 py-1.5 rounded-xl border border-white/10 bg-white/5 text-xs hover:bg-white/10"
@@ -1772,16 +1754,18 @@ export default function DashboardPage() {
                   ) : null}
                 </div>
 
-
                 {ctraderErr ? <div className="mt-2 text-sm text-red-200/80">{ctraderErr}</div> : null}
 
                 <div className="mt-3 flex flex-col sm:flex-row gap-2 sm:items-center">
                   <button
                     className="px-3 py-2 rounded-xl border border-white/10 bg-white/5 text-sm hover:bg-white/10"
-                    onClick={() => {
-                      const base = process.env.NEXT_PUBLIC_API_BASE_URL || '';
-                      const url = base ? base.replace(/\/$/, '') + '/ctrader/connect' : '/ctrader/connect';
-                      window.location.href = url;
+                    onClick={async () => {
+                      try {
+                        const url = await getCTraderConnectUrl();
+                        window.location.assign(url);
+                      } catch (e: any) {
+                        setCTraderErr(toDisplayString(e));
+                      }
                     }}
                     title="Start cTrader OAuth"
                   >
@@ -1824,19 +1808,16 @@ export default function DashboardPage() {
 
             <div className="p-4 rounded-2xl border border-white/10 bg-white/5 backdrop-blur-sm">
               <div className="font-semibold">AURIX readiness</div>
-              <div className="text-xs opacity-60">Institutional checks run only once observation maturity is Established and baseline is locked.</div>
+              <div className="text-xs opacity-60">
+                Institutional checks run only once observation maturity is Established and baseline is locked.
+              </div>
 
               {(() => {
                 const band = String(trend?.maturity?.band ?? data?.maturity?.band ?? 'initial');
                 const baselineOk = Boolean((trend?.baselineLocked ?? data?.baselineLocked) === true);
                 const ok = band === 'established' && baselineOk;
 
-                const reason =
-                  ok
-                    ? 'Maturity established and baseline locked.'
-                    : band !== 'established'
-                      ? 'Awaiting Established maturity.'
-                      : 'Awaiting baseline lock.';
+                const reason = ok ? 'Maturity established and baseline locked.' : band !== 'established' ? 'Awaiting Established maturity.' : 'Awaiting baseline lock.';
 
                 return (
                   <div className="mt-3">
@@ -1864,7 +1845,8 @@ export default function DashboardPage() {
                 </div>
                 {bestWorstSource ? (
                   <div className="text-xs opacity-80">
-                    Best (7d avg): <span className="font-semibold">{bestWorstSource.best.source}</span> • Worst: <span className="font-semibold">{bestWorstSource.worst.source}</span>
+                    Best (7d avg): <span className="font-semibold">{bestWorstSource.best.source}</span> • Worst:{' '}
+                    <span className="font-semibold">{bestWorstSource.worst.source}</span>
                   </div>
                 ) : null}
               </div>
@@ -1907,7 +1889,8 @@ export default function DashboardPage() {
                   return calendar28.map((d) => {
                     const t = d.tradeCount;
                     const intensity = t === 0 ? 0.06 : clamp(t / max, 0.12, 1);
-                    const title = `${d.date}\nTrades: ${t}` +
+                    const title =
+                      `${d.date}\nTrades: ${t}` +
                       (d.hasEntry ? `\nNotes: ${d.types?.length ? d.types.join(', ') : 'yes'}` : '') +
                       (d.sources?.length ? `\nSources: ${d.sources.join(', ')}` : '');
                     return (
@@ -1921,9 +1904,7 @@ export default function DashboardPage() {
                           router.push(`/journal?date=${d.date}&month=${m}`);
                         }}
                       >
-                        {d.hasEntry ? (
-                          <span className="pointer-events-none absolute inset-[2px] rounded-[4px] ring-1 ring-white/45" />
-                        ) : null}
+                        {d.hasEntry ? <span className="pointer-events-none absolute inset-[2px] rounded-[4px] ring-1 ring-white/45" /> : null}
                       </button>
                     );
                   });
