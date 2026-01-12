@@ -5,8 +5,8 @@ import { useRouter } from 'next/navigation';
 import Protected from '@/components/Protected';
 import { apiFetch } from '@/lib/api';
 import { clearToken } from '@/lib/auth';
-import { MaturityBadge, type ATXMaturity } from '@/components/MaturityBadge';
-import { Sparkline } from '@/components/Sparkline';
+import { MaturityBadge, type ATXMaturity } from '../../components/MaturityBadge';
+import { Sparkline } from '../../components/Sparkline';
 
 type Account = {
   accountId: number;
